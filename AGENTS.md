@@ -34,6 +34,8 @@ Runnable on macOS (control plane only, no actual warp):
 limactl start --name=gvisor ./lima/gvisor.yaml   # Ubuntu VM, Docker + runsc, no nested virt
 ./gvisor/build-runsc.sh                           # (in VM) fetch gVisor, patch, go build ./runsc
 RATE=1000 ./gvisor/run-victim.sh                  # (in VM) run the unmodified victim warped
+./gvisor/install-runtimes.sh                      # (in VM) register runsc-warp{,-hour,-fast} Docker runtimes
+bash stack/up.sh                                  # (in VM) Postgres at 3600x + UI on host :8080
 scripts/smoke-test.sh                             # (in VM) go/no-go: real images under plain runsc
 ```
 
@@ -45,7 +47,7 @@ The heavy end-to-end CI job (`build-runsc`) is opt-in via workflow_dispatch only
 - **`gvisor/apply-clockwarp.py`** — the patch's source of truth. It re-applies the same edits by matching source anchors, so when a gVisor bump breaks the static patch, this regenerates it. `build-runsc.sh` tries the static patch first, falls back to the script.
 - **`victim/`** — an ordinary, warp-unaware Go program exercising the three reads that must warp together (wall clock, elapsed, timer). The test target.
 - **`authority/`** — HTTP control plane holding `(anchorReal, anchorVirtual, multiplier)`; `virtual(t) = anchorVirtual + (t - anchorReal) * multiplier`. Builds and runs, but nothing reads it yet — the sentry gets its multiplier from the runsc flag, not from here.
-- **`stack/`** — Docker demo in the VM: unmodified Postgres under the warped runtime, a normal-runtime UI (`stack/ui/`, Bun, built as `twui:latest` by `stack/up.sh`) reading its warped `now()`.
+- **`stack/`** — Docker demo in the VM: unmodified Postgres under the warped runtime (`runsc-warp-hour`, 3600x = 1 sim hour per real second), a normal-runtime UI (`stack/ui/`, Bun, built as `twui:latest` by `stack/up.sh`) reading its warped `now()`.
 - **`k8s-lab/`** — the warp on a real workload: installs `runsc-warp` as a containerd RuntimeClass on KinD nodes and moves the local-dev Postgres pod onto it (90-day deposit matures in ~90s). Deliberately single-pod-Postgres only: distributed DBs and the gRPC mesh need the shared-anchor work first. Runbook in `k8s-lab/README.md`.
 
 ## Constraints that shape changes

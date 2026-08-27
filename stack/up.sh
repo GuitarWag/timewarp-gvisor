@@ -1,16 +1,25 @@
 #!/usr/bin/env bash
 # Bring up the persistent warped stack in the VM:
-#   - postgres : UNMODIFIED image under runsc-warp-fast (86400x)  -> warped now()
+#   - postgres : UNMODIFIED image under runsc-warp-hour (3600x, 1 hr/s) -> warped now()
 #   - twui     : the demo's Bun API + UI on the NORMAL runtime    -> real-time pacing
 # The UI reads Postgres's warped clock; deposits/interest/cron all run off now().
 set -e
 H="$(cd "$(dirname "$0")/.." && pwd)"
 
+RUNTIME="${RUNTIME:-runsc-warp-hour}"
+if ! docker info --format '{{json .Runtimes}}' | grep -q "\"$RUNTIME\""; then
+  cat >&2 <<EOF
+runtime "$RUNTIME" is not registered with Docker.
+Run ./gvisor/build-runsc.sh then ./gvisor/install-runtimes.sh (inside the VM).
+EOF
+  exit 1
+fi
+
 docker rm -f pg twui >/dev/null 2>&1 || true
 docker network create tw >/dev/null 2>&1 || true
 
 echo "starting warped postgres..."
-docker run -d --name pg --network tw --runtime=runsc-warp-fast \
+docker run -d --name pg --network tw --runtime="$RUNTIME" \
   -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=timewarp \
   -v "$H/stack/schema-native.sql:/docker-entrypoint-initdb.d/schema.sql:ro" \
   postgres:17-alpine >/dev/null
@@ -20,7 +29,6 @@ echo "building + starting frontend (Bun API + UI, normal runtime)..."
 docker build -q -t twui:latest "$(dirname "$0")/ui" >/dev/null
 docker run -d --name twui --network tw \
   -e DATABASE_URL=postgres://postgres:postgres@pg:5432/timewarp \
-  -e WORKER_URL=http://disabled:0 \
   -p 8080:3000 \
   twui:latest >/dev/null
 

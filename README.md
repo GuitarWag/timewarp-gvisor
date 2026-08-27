@@ -53,6 +53,7 @@ tree is used):
 ```bash
 ./gvisor/build-runsc.sh           # fetch gVisor, apply clockwarp.patch, build runsc-warp
 RATE=1000 ./gvisor/run-victim.sh  # run the unmodified victim at 1000x
+./gvisor/install-runtimes.sh      # register runsc-warp{,-hour,-fast} as Docker runtimes
 ```
 
 `build-runsc.sh` applies the committed `clockwarp.patch` (pinned to
@@ -90,6 +91,27 @@ limactl shell gvisor -- bash /tmp/smoke-test.sh
 (`postgres`, the Temporal Go binary, `bun`) under `--runtime=runsc` and checks each
 actually works under gVisor — before any sentry patching. Tear down with
 `limactl delete -f gvisor`.
+
+## Demo stack: unmodified Postgres at 1 hour per second (Lima)
+
+`stack/` runs upstream `postgres:17-alpine` under the `runsc-warp-hour` runtime
+(3600x) and a small Bun API + UI on the normal runtime that reads the warped
+`now()`. Term deposits accrue daily interest, mature and roll over; sim-time cron
+jobs fire; a live chart shows events per simulated hour.
+
+![Stack UI: simulated clock at 3600x next to real time, events-per-hour chart, term deposits](docs/stack-ui.png)
+
+```bash
+limactl shell gvisor                # inside the VM, repo is mounted at the same path
+./gvisor/build-runsc.sh && ./gvisor/install-runtimes.sh   # once
+bash stack/up.sh                    # then open http://localhost:8080 on the host
+docker rm -f pg twui                # tear down
+```
+
+The rate is fixed when the sandbox boots (`--timewarp-multiplier` in
+`/etc/docker/daemon.json`, written by `install-runtimes.sh`). The `sim_clock`
+row in Postgres only mirrors that number for the UI label; the warp itself
+comes from gVisor.
 
 ## Warping a Kubernetes workload (KinD)
 

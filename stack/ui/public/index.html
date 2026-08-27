@@ -78,35 +78,47 @@
   .evt.matured  .k { color: var(--good); }
   .evt.bonus    .k { color: #b98bff; }
   .evt.cron     .k { color: #3fc6c6; }
+  .evt.rolled   .k { color: #ff8a5b; }
+  canvas { width: 100%; height: 240px; display: block; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .amt { font-variant-numeric: tabular-nums; text-align: right; }
   .evt.appear { animation: appear .4s ease; }
   @keyframes appear { from { background: rgba(79,140,255,.18); } }
 </style>
 </head>
 <body>
   <h1>TIME WARP</h1>
-  <p class="sub">A 90-day term deposit, proven in seconds. The clock below drives the API and Postgres alike.</p>
+  <p class="sub">Unmodified Postgres under a clock-warped gVisor runtime. Everything below runs off plain <code>now()</code>.</p>
 
   <div class="grid">
     <div class="panel">
       <div class="clock">
         <div>
           <div class="time" id="simTime">--:--:--</div>
-          <div class="date" id="simDate">simulated time</div>
+          <div class="date" id="simDate">simulated time (Postgres)</div>
         </div>
-        <div class="rate" id="rate">1×</div>
+        <div>
+          <div class="time muted" id="realTime" style="font-size:22px">--:--:--</div>
+          <div class="date">real time (host)</div>
+        </div>
+        <div class="rate" id="rate">…</div>
       </div>
-      <div class="speeds" id="speeds">
-        <button class="normal" data-mult="1">Normal (1×)</button>
-        <button data-mult="60">1 min/s (60×)</button>
-        <button data-mult="3600">1 hr/s (3,600×)</button>
-        <button data-mult="86400">1 day/s (86,400×)</button>
-        <button data-mult="0">Pause</button>
+      <p class="muted" style="margin:12px 0 0; font-size:12px">Rate is fixed when the sandbox boots (<code>runsc --timewarp-multiplier</code>). Live rate changes are on the roadmap.</p>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="justify-content:space-between; margin-bottom:8px;">
+        <strong>Last 72 sim-hours — events per hour, total book</strong>
+        <span class="muted" id="seriesInfo">—</span>
       </div>
+      <canvas id="chart"></canvas>
+      <div class="legend" id="legend"></div>
     </div>
 
     <div class="panel">
       <div class="row" style="justify-content:space-between; margin-bottom:12px;">
-        <strong>Term deposits (90-day maturity)</strong>
+        <strong>Term deposits — daily interest, auto-rollover</strong>
         <div class="row">
           <button id="add">+ Open deposit</button>
           <button id="reset" class="muted">Reset</button>
@@ -114,9 +126,9 @@
       </div>
       <table>
         <thead>
-          <tr><th>#</th><th>Opened</th><th>Matures</th><th>Progress</th><th>Status</th></tr>
+          <tr><th>Deposit</th><th>Term</th><th class="amt">Balance</th><th>Opened</th><th>Matures</th><th>Progress</th><th>Status</th></tr>
         </thead>
-        <tbody id="rows"><tr><td colspan="5" class="muted">No deposits yet — open one.</td></tr></tbody>
+        <tbody id="rows"><tr><td colspan="7" class="muted">No deposits yet — open one.</td></tr></tbody>
       </table>
     </div>
 
@@ -179,23 +191,24 @@ async function loadSchedules() {
   </tr>`).join("");
 }
 
+const RATE_LABEL = { 60: "1 min/s", 3600: "1 hr/s", 86400: "1 day/s" };
 function paintRate() {
   const m = clock.multiplier;
-  document.getElementById("rate").textContent = m === 0 ? "Paused" : m.toLocaleString() + "×";
-  document.querySelectorAll("#speeds button").forEach(b =>
-    b.classList.toggle("active", Number(b.dataset.mult) === m));
+  document.getElementById("rate").textContent =
+    (RATE_LABEL[m] ? RATE_LABEL[m] + " · " : "") + m.toLocaleString() + "×";
 }
 
 function paintClock() {
   const now = simNow();
   document.getElementById("simTime").textContent = fmtTime(now);
-  document.getElementById("simDate").textContent = fmtDate(now);
+  document.getElementById("simDate").textContent = fmtDate(now) + " · simulated (Postgres)";
+  document.getElementById("realTime").textContent = fmtTime(Date.now());
 }
 
 function paintDeposits() {
   const rows = document.getElementById("rows");
   if (!deposits.length) {
-    rows.innerHTML = '<tr><td colspan="5" class="muted">No deposits yet — open one.</td></tr>';
+    rows.innerHTML = '<tr><td colspan="7" class="muted">No deposits yet — open one.</td></tr>';
     return;
   }
   const now = simNow();
@@ -205,7 +218,9 @@ function paintDeposits() {
     const pct = Math.max(0, Math.min(100, ((now - opened) / (matures - opened)) * 100));
     const done = now >= matures;
     return `<tr>
-      <td>${d.id}</td>
+      <td>${d.label}${d.rollovers ? ` <span class="muted">×${d.rollovers + 1}</span>` : ""}</td>
+      <td class="muted">${d.term_days}d</td>
+      <td class="amt">${Number(d.amount).toLocaleString("en-GB", { minimumFractionDigits: 2 })}</td>
       <td>${fmtDate(opened)}</td>
       <td>${fmtDate(matures)}</td>
       <td><div class="bar ${done ? "done" : ""}"><span style="width:${pct}%"></span></div></td>
@@ -217,14 +232,6 @@ function paintDeposits() {
 // Animate the clock and progress bars locally; only re-sync with the server periodically.
 function tick() { paintClock(); paintDeposits(); requestAnimationFrame(tick); }
 
-document.getElementById("speeds").addEventListener("click", async e => {
-  const btn = e.target.closest("button");
-  if (!btn) return;
-  await fetch("/api/clock", { method:"POST", headers:{ "content-type":"application/json" },
-    body: JSON.stringify({ multiplier: Number(btn.dataset.mult) }) });
-  await syncClock();
-});
-
 document.getElementById("add").addEventListener("click", async () => {
   await fetch("/api/deposits", { method:"POST", headers:{ "content-type":"application/json" }, body:"{}" });
   await loadDeposits();
@@ -234,7 +241,7 @@ document.getElementById("reset").addEventListener("click", async () => {
   await fetch("/api/reset", { method:"POST" });
   maxEventId = 0;
   document.getElementById("feed").innerHTML = "";
-  await syncClock(); await loadDeposits(); await loadSchedules(); await loadEvents();
+  await syncClock(); await loadDeposits(); await loadSchedules(); await loadEvents(); await loadSeries();
 });
 
 const fmtStamp = ms => new Date(ms).toLocaleString("en-GB",
@@ -244,6 +251,7 @@ const KIND = {
   "deposit.opened":   { cls:"opened",   tag:"OPENED" },
   "interest.accrued": { cls:"interest", tag:"INTEREST" },
   "deposit.matured":  { cls:"matured",  tag:"MATURED" },
+  "deposit.rolled":   { cls:"rolled",   tag:"ROLLOVER" },
   "bonus.scheduled":  { cls:"bonus",    tag:"TEMPORAL ⏱" },
   "bonus.paid":       { cls:"bonus",    tag:"TEMPORAL ✓" },
 };
@@ -276,14 +284,119 @@ async function loadEvents() {
   document.getElementById("evtCount").textContent = `${eventCount} events`;
 }
 
+// ---- time-series chart: stacked bars of events per sim-hour + total-book line
+const HOURS = 72;
+const SERIES = [
+  ["cron",             "#3fc6c6", "cron jobs"],
+  ["interest.accrued", "#d9a23b", "interest"],
+  ["deposit.opened",   "#4f8cff", "opened"],
+  ["deposit.matured",  "#2fbf71", "matured"],
+  ["deposit.rolled",   "#ff8a5b", "rollover"],
+];
+document.getElementById("legend").innerHTML =
+  SERIES.map(([, c, l]) => `<span><i style="background:${c}"></i>${l}</span>`).join("") +
+  `<span><i style="background:#fff;height:2px;vertical-align:3px"></i>total book</span>`;
+
+let seriesData = { samples: [], buckets: [] };
+async function loadSeries() {
+  seriesData = await fetch(`/api/series?hours=${HOURS}`).then(r => r.json());
+  drawChart();
+}
+
+function drawChart() {
+  const cv = document.getElementById("chart");
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== W * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const HOUR = 3600000;
+  const end = Math.floor(simNow() / HOUR) * HOUR;           // current sim hour
+  const start = end - (HOURS - 1) * HOUR;
+  const idx = t => Math.round((t - start) / HOUR);
+
+  const counts = Array.from({ length: HOURS }, () => ({}));
+  let maxN = 1;
+  for (const b of seriesData.buckets) {
+    const i = idx(new Date(b.h).getTime());
+    if (i < 0 || i >= HOURS) continue;
+    counts[i][b.kind] = (counts[i][b.kind] ?? 0) + b.n;
+  }
+  for (const c of counts) maxN = Math.max(maxN, Object.values(c).reduce((a, b) => a + b, 0));
+
+  const pts = seriesData.samples
+    .map(s => ({ i: idx(new Date(s.sim_at).getTime()), v: Number(s.total) }))
+    .filter(p => p.i >= 0 && p.i < HOURS);
+  const vals = pts.map(p => p.v);
+  const vMin = vals.length ? Math.min(...vals) : 0, vMax = vals.length ? Math.max(...vals) : 1;
+  const pad = (vMax - vMin) * 0.15 || 1;
+
+  const L = 34, R = 78, T = 8, B = 22;
+  const pw = W - L - R, ph = H - T - B;
+  const bw = pw / HOURS;
+  ctx.font = "10px ui-monospace, monospace";
+
+  // grid + left axis (event counts)
+  ctx.strokeStyle = "#1f2737"; ctx.fillStyle = "#7c879b"; ctx.textAlign = "right";
+  for (let k = 0; k <= 4; k++) {
+    const y = T + ph - (ph * k) / 4;
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + pw, y); ctx.stroke();
+    ctx.fillText(String(Math.round((maxN * k) / 4)), L - 6, y + 3);
+  }
+  // right axis (book total)
+  ctx.textAlign = "left";
+  for (let k = 0; k <= 4; k++) {
+    const y = T + ph - (ph * k) / 4;
+    const v = vMin - pad + ((vMax - vMin + 2 * pad) * k) / 4;
+    ctx.fillText(v.toLocaleString("en-GB", { maximumFractionDigits: 0 }), L + pw + 6, y + 3);
+  }
+  // x labels: every 12 sim-hours
+  ctx.textAlign = "center";
+  for (let i = 0; i < HOURS; i += 12) {
+    const t = start + i * HOUR;
+    ctx.fillText(new Date(t).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit" }),
+                 L + bw * i + bw / 2, H - 6);
+  }
+  // stacked bars
+  for (let i = 0; i < HOURS; i++) {
+    let y = T + ph;
+    for (const [k, color] of SERIES) {
+      const n = counts[i][k] ?? 0;
+      if (!n) continue;
+      const h = (n / maxN) * ph;
+      ctx.fillStyle = color;
+      ctx.fillRect(L + bw * i + 1, y - h, Math.max(1, bw - 2), h);
+      y -= h;
+    }
+  }
+  // total-book line
+  if (pts.length > 1) {
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5; ctx.beginPath();
+    pts.forEach((p, j) => {
+      const x = L + bw * p.i + bw / 2;
+      const y = T + ph - ((p.v - (vMin - pad)) / (vMax - vMin + 2 * pad)) * ph;
+      j ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke(); ctx.lineWidth = 1;
+  }
+  const total = counts.reduce((a, c) => a + Object.values(c).reduce((x, y) => x + y, 0), 0);
+  document.getElementById("seriesInfo").textContent =
+    `${total} events · book ${vals.length ? vals[vals.length - 1].toLocaleString("en-GB", { maximumFractionDigits: 2 }) : "—"}`;
+}
+window.addEventListener("resize", drawChart);
+
 await syncClock();
 await loadDeposits();
 await loadSchedules();
 await loadEvents();
+await loadSeries();
 setInterval(syncClock, 3000);     // keep local estimate honest
 setInterval(loadDeposits, 1500);  // pick up new/matured deposits
 setInterval(loadSchedules, 1500); // refresh next-run times + run counts
 setInterval(loadEvents, 1000);    // stream the event feed
+setInterval(loadSeries, 1000);    // scroll the chart
 tick();
 </script>
 </body>

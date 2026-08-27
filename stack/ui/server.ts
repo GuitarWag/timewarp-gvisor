@@ -45,26 +45,18 @@ async function waitForDb(): Promise<void> {
 }
 
 async function getClock() {
-  const [row] = await db`
-    SELECT sim_now() AS sim_now,
-           now()     AS real_now,
-           multiplier
-    FROM sim_clock WHERE id = 1`;
+  const [row] = await db`SELECT sim_now() AS sim_now, multiplier FROM sim_clock WHERE id = 1`;
   return {
     simNow: row.sim_now,
-    realNow: row.real_now,
+    // This process runs on the normal runtime, so its clock is real time.
+    realNow: new Date().toISOString(),
     multiplier: Number(row.multiplier),
   };
 }
 
-async function setSpeed(multiplier: number) {
-  await db`SELECT set_speed(${multiplier})`;
-  return getClock();
-}
-
 async function listDeposits() {
   return db`
-    SELECT id, label, amount, term_days, created_at, matured_at,
+    SELECT id, label, amount, term_days, created_at, matured_at, rollovers,
            created_at + make_interval(days => term_days) AS matures_at,
            sim_now()                                     AS now,
            matured_at IS NOT NULL                        AS matured
@@ -79,6 +71,21 @@ async function listSchedules() {
     ORDER BY next_run_at`;
 }
 
+// Time series for the graph: hourly book snapshots plus events per sim-hour.
+async function series(hours: number) {
+  const since = db`sim_now() - make_interval(hours => ${hours})`;
+  const samples = await db`
+    SELECT sim_at, total, active, matured FROM samples
+    WHERE sim_at > ${since} ORDER BY sim_at`;
+  const buckets = await db`
+    SELECT date_trunc('hour', sim_at) AS h,
+           CASE WHEN kind LIKE 'cron.%' THEN 'cron' ELSE kind END AS kind,
+           count(*)::int AS n
+    FROM events WHERE sim_at > ${since}
+    GROUP BY 1, 2 ORDER BY 1`;
+  return { samples, buckets };
+}
+
 async function listEvents(afterId: number) {
   return db`
     SELECT id, sim_at, real_at, kind, deposit_id, message, data
@@ -88,11 +95,13 @@ async function listEvents(afterId: number) {
     LIMIT 200`;
 }
 
-const WORKER_URL = process.env.WORKER_URL ?? "http://localhost:8088";
+// Optional Temporal worker. Unset (or empty) = no workflows, no noise.
+const WORKER_URL = process.env.WORKER_URL || "";
 
 // Ask the Temporal worker to start a durable loyalty-bonus workflow for a
 // deposit. Fire-and-forget: the demo still works if Temporal isn't deployed.
 function startBonusWorkflow(depositId: number) {
+  if (!WORKER_URL) return;
   fetch(`${WORKER_URL}/start`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -152,14 +161,12 @@ const server = Bun.serve({
     }),
     "/healthz": new Response("ok"),
 
-    "/api/clock": {
-      GET: async () => json(await getClock()),
-      POST: async (req) => {
-        const { multiplier } = (await req.json()) as { multiplier: number };
-        if (!Number.isFinite(multiplier) || multiplier < 0) {
-          return json({ error: "multiplier must be a non-negative number" }, 400);
-        }
-        return json(await setSpeed(multiplier));
+    "/api/clock": { GET: async () => json(await getClock()) },
+
+    "/api/series": {
+      GET: async (req) => {
+        const h = Number(new URL(req.url).searchParams.get("hours") ?? 72);
+        return json(await series(Number.isFinite(h) && h > 0 ? Math.min(h, 24 * 90) : 72));
       },
     },
 

@@ -1,16 +1,16 @@
 # Run the demo's real services under the clock-warped gVisor runtime.
-# Requires runsc-warp-fast registered in the VM's /etc/docker/daemon.json
-# (path=/usr/local/bin/runsc-warp, runtimeArgs=[--platform=systrap,--timewarp-multiplier=86400]).
+# Requires runsc-warp-hour registered in the VM's /etc/docker/daemon.json
+# (path=/usr/local/bin/runsc-warp, runtimeArgs=[--platform=systrap,--timewarp-multiplier=3600]).
 #
 #   docker compose -f stack/compose.yml up
 #
 # Every service below is an UNMODIFIED upstream image; the only change is
-# `runtime: runsc-warp-fast`, which makes its clock (and timers, and Postgres
-# now()) run at 1 simulated day per real second — no application code changes.
+# `runtime: runsc-warp-hour`, which makes its clock (and timers, and Postgres
+# now()) run at 1 simulated hour per real second — no application code changes.
 services:
   postgres:
     image: postgres:17-alpine
-    runtime: runsc-warp-fast
+    runtime: runsc-warp-hour
     environment:
       POSTGRES_PASSWORD: x
       POSTGRES_DB: timewarp
@@ -18,7 +18,7 @@ services:
       - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
     ports: ["5432:5432"]
 
-  # Temporal and a worker can be added the same way — set `runtime: runsc-warp-fast`
+  # Temporal and a worker can be added the same way — set `runtime: runsc-warp-hour`
   # and a real workflow.Sleep(90*day) fires in ~90s, since the Temporal server's
   # own clock is warped. For cross-service wall-clock AGREEMENT at high multipliers,
   # give every service a shared anchor (a --timewarp-anchor flag on the runtime) so
