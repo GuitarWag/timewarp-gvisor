@@ -1,0 +1,18 @@
+# Go build output
+*.exe
+*.test
+*.out
+# compiled module binaries (named after their dir by `go build`)
+/authority/authority
+/victim/victim
+victim/victim-bin
+authority/authority-bin
+
+# gVisor build artifacts (built outside the tree, but guard anyway)
+runsc
+runsc-warp
+gvisor-build/
+
+# Editor / OS
+.DS_Store
+*.swp

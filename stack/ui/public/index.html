@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Time Warp</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #121722;
+    --line: #1f2737;
+    --text: #d7dde8;
+    --muted: #7c879b;
+    --accent: #4f8cff;
+    --good: #2fbf71;
+    --pending: #d9a23b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    padding: 24px;
+  }
+  h1 { font-size: 16px; letter-spacing: .04em; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .grid { display: grid; gap: 16px; max-width: 920px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .clock { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  .clock .time { font-size: 34px; font-variant-numeric: tabular-nums; }
+  .clock .date { color: var(--muted); }
+  .rate {
+    margin-left: auto;
+    padding: 4px 10px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--accent);
+    font-size: 12px;
+  }
+  .speeds { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  button {
+    background: #1a2233;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.normal { border-color: var(--good); color: var(--good); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .bar { height: 6px; background: #0c1422; border-radius: 4px; overflow: hidden; min-width: 120px; }
+  .bar > span { display: block; height: 100%; background: var(--pending); transition: width .2s linear; }
+  .bar.done > span { background: var(--good); }
+  .badge { padding: 2px 8px; border-radius: 999px; font-size: 11px; }
+  .badge.pending { background: rgba(217,162,59,.15); color: var(--pending); }
+  .badge.matured { background: rgba(47,191,113,.15); color: var(--good); }
+  .muted { color: var(--muted); }
+  .feed { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+  .evt { display: grid; grid-template-columns: 168px 132px 1fr; gap: 10px; align-items: baseline;
+         padding: 5px 8px; border-radius: 6px; font-size: 12.5px; }
+  .evt:nth-child(odd) { background: rgba(255,255,255,.02); }
+  .evt .ts { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .evt .k { font-size: 11px; }
+  .evt.opened   .k { color: var(--accent); }
+  .evt.interest .k { color: var(--pending); }
+  .evt.matured  .k { color: var(--good); }
+  .evt.bonus    .k { color: #b98bff; }
+  .evt.cron     .k { color: #3fc6c6; }
+  .evt.appear { animation: appear .4s ease; }
+  @keyframes appear { from { background: rgba(79,140,255,.18); } }
+</style>
+</head>
+<body>
+  <h1>TIME WARP</h1>
+  <p class="sub">A 90-day term deposit, proven in seconds. The clock below drives the API and Postgres alike.</p>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="clock">
+        <div>
+          <div class="time" id="simTime">--:--:--</div>
+          <div class="date" id="simDate">simulated time</div>
+        </div>
+        <div class="rate" id="rate">1×</div>
+      </div>
+      <div class="speeds" id="speeds">
+        <button class="normal" data-mult="1">Normal (1×)</button>
+        <button data-mult="60">1 min/s (60×)</button>
+        <button data-mult="3600">1 hr/s (3,600×)</button>
+        <button data-mult="86400">1 day/s (86,400×)</button>
+        <button data-mult="0">Pause</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="justify-content:space-between; margin-bottom:12px;">
+        <strong>Term deposits (90-day maturity)</strong>
+        <div class="row">
+          <button id="add">+ Open deposit</button>
+          <button id="reset" class="muted">Reset</button>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>#</th><th>Opened</th><th>Matures</th><th>Progress</th><th>Status</th></tr>
+        </thead>
+        <tbody id="rows"><tr><td colspan="5" class="muted">No deposits yet — open one.</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="justify-content:space-between; margin-bottom:12px;">
+        <strong>Scheduled jobs — sim-time cron in Postgres</strong>
+        <span class="muted">fire on simulated time</span>
+      </div>
+      <table>
+        <thead>
+          <tr><th>Job</th><th>Cadence</th><th>Next run (sim)</th><th>Runs</th></tr>
+        </thead>
+        <tbody id="schedRows"><tr><td colspan="4" class="muted">—</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="justify-content:space-between; margin-bottom:12px;">
+        <strong>Event log — server-side, time-driven</strong>
+        <span class="muted" id="evtCount">0 events</span>
+      </div>
+      <div id="feed" class="feed"><div class="muted">Waiting for events…</div></div>
+    </div>
+  </div>
+
+<script type="module">
+const DAY = 86400000;
+let clock = { simNowMs: Date.now(), multiplier: 1, syncedLocal: performance.now() };
+let deposits = [];
+
+const fmtTime = ms => new Date(ms).toLocaleTimeString("en-GB");
+const fmtDate = ms => new Date(ms).toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" });
+
+// Estimate simulated "now" between server syncs by extrapolating with the multiplier.
+function simNow() {
+  const elapsed = performance.now() - clock.syncedLocal;
+  return clock.simNowMs + elapsed * clock.multiplier;
+}
+
+async function syncClock() {
+  const c = await fetch("/api/clock").then(r => r.json());
+  clock = { simNowMs: new Date(c.simNow).getTime(), multiplier: c.multiplier, syncedLocal: performance.now() };
+  paintRate();
+}
+
+async function loadDeposits() {
+  deposits = await fetch("/api/deposits").then(r => r.json());
+  paintDeposits();
+}
+
+async function loadSchedules() {
+  const rows = await fetch("/api/schedules").then(r => r.json());
+  const body = document.getElementById("schedRows");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="4" class="muted">—</td></tr>'; return; }
+  body.innerHTML = rows.map(s => `<tr>
+    <td>${s.name}</td>
+    <td class="muted">${s.cadence}</td>
+    <td>${fmtStamp(new Date(s.next_run_at).getTime())}</td>
+    <td>${s.runs}</td>
+  </tr>`).join("");
+}
+
+function paintRate() {
+  const m = clock.multiplier;
+  document.getElementById("rate").textContent = m === 0 ? "Paused" : m.toLocaleString() + "×";
+  document.querySelectorAll("#speeds button").forEach(b =>
+    b.classList.toggle("active", Number(b.dataset.mult) === m));
+}
+
+function paintClock() {
+  const now = simNow();
+  document.getElementById("simTime").textContent = fmtTime(now);
+  document.getElementById("simDate").textContent = fmtDate(now);
+}
+
+function paintDeposits() {
+  const rows = document.getElementById("rows");
+  if (!deposits.length) {
+    rows.innerHTML = '<tr><td colspan="5" class="muted">No deposits yet — open one.</td></tr>';
+    return;
+  }
+  const now = simNow();
+  rows.innerHTML = deposits.map(d => {
+    const opened = new Date(d.created_at).getTime();
+    const matures = new Date(d.matures_at).getTime();
+    const pct = Math.max(0, Math.min(100, ((now - opened) / (matures - opened)) * 100));
+    const done = now >= matures;
+    return `<tr>
+      <td>${d.id}</td>
+      <td>${fmtDate(opened)}</td>
+      <td>${fmtDate(matures)}</td>
+      <td><div class="bar ${done ? "done" : ""}"><span style="width:${pct}%"></span></div></td>
+      <td><span class="badge ${done ? "matured" : "pending"}">${done ? "MATURED" : "pending"}</span></td>
+    </tr>`;
+  }).join("");
+}
+
+// Animate the clock and progress bars locally; only re-sync with the server periodically.
+function tick() { paintClock(); paintDeposits(); requestAnimationFrame(tick); }
+
+document.getElementById("speeds").addEventListener("click", async e => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  await fetch("/api/clock", { method:"POST", headers:{ "content-type":"application/json" },
+    body: JSON.stringify({ multiplier: Number(btn.dataset.mult) }) });
+  await syncClock();
+});
+
+document.getElementById("add").addEventListener("click", async () => {
+  await fetch("/api/deposits", { method:"POST", headers:{ "content-type":"application/json" }, body:"{}" });
+  await loadDeposits();
+});
+
+document.getElementById("reset").addEventListener("click", async () => {
+  await fetch("/api/reset", { method:"POST" });
+  maxEventId = 0;
+  document.getElementById("feed").innerHTML = "";
+  await syncClock(); await loadDeposits(); await loadSchedules(); await loadEvents();
+});
+
+const fmtStamp = ms => new Date(ms).toLocaleString("en-GB",
+  { day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit", second:"2-digit" });
+
+const KIND = {
+  "deposit.opened":   { cls:"opened",   tag:"OPENED" },
+  "interest.accrued": { cls:"interest", tag:"INTEREST" },
+  "deposit.matured":  { cls:"matured",  tag:"MATURED" },
+  "bonus.scheduled":  { cls:"bonus",    tag:"TEMPORAL ⏱" },
+  "bonus.paid":       { cls:"bonus",    tag:"TEMPORAL ✓" },
+};
+
+let maxEventId = 0;
+let eventCount = 0;
+
+async function loadEvents() {
+  // API returns newest-first; we prepend anything past the last id we've seen.
+  const rows = await fetch(`/api/events?after=${maxEventId}`).then(r => r.json());
+  if (!rows.length) return;
+  const feed = document.getElementById("feed");
+  if (eventCount === 0) feed.innerHTML = "";
+  for (const e of rows.slice().reverse()) {       // oldest of the batch first
+    if (e.id <= maxEventId) continue;
+    maxEventId = Math.max(maxEventId, e.id);
+    eventCount++;
+    const meta = KIND[e.kind] ??
+      (e.kind.startsWith("cron.")
+        ? { cls:"cron", tag:"CRON · " + e.kind.slice(5) }
+        : { cls:"", tag:e.kind.toUpperCase() });
+    const el = document.createElement("div");
+    el.className = `evt ${meta.cls} appear`;
+    el.innerHTML = `<span class="ts">${fmtStamp(new Date(e.sim_at).getTime())}</span>` +
+                   `<span class="k">${meta.tag}</span>` +
+                   `<span>${e.message}</span>`;
+    feed.prepend(el);
+  }
+  while (feed.childElementCount > 300) feed.lastElementChild.remove();
+  document.getElementById("evtCount").textContent = `${eventCount} events`;
+}
+
+await syncClock();
+await loadDeposits();
+await loadSchedules();
+await loadEvents();
+setInterval(syncClock, 3000);     // keep local estimate honest
+setInterval(loadDeposits, 1500);  // pick up new/matured deposits
+setInterval(loadSchedules, 1500); // refresh next-run times + run counts
+setInterval(loadEvents, 1000);    // stream the event feed
+tick();
+</script>
+</body>
+</html>

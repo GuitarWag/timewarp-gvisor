@@ -1,0 +1,56 @@
+# Lima VM: a real Linux guest with Docker + gVisor (runsc) as a registered
+# runtime. Uses Apple's Virtualization.framework (vz) — fast, no nested virt.
+# gVisor's systrap platform needs no KVM, so it runs fine inside this guest.
+#
+#   limactl start --name=gvisor ./lima/gvisor.yaml
+#   limactl shell gvisor -- bash /tmp/smoke-test.sh   (see scripts/smoke-test.sh)
+
+vmType: "vz"
+cpus: 4
+memory: "6GiB"
+disk: "30GiB"
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+
+mounts:
+  - location: "~/Documents/git/timewarp-gvisor"
+    writable: false
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+      # Docker
+      if ! command -v docker >/dev/null; then
+        curl -fsSL https://get.docker.com | sh
+      fi
+      usermod -aG docker "${LIMA_CIDATA_USER}" || true
+      # gVisor (runsc + containerd shim) from the official release bucket
+      if ! command -v runsc >/dev/null; then
+        ARCH="$(uname -m)"
+        URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+        cd /tmp
+        wget -q "${URL}/runsc" "${URL}/runsc.sha512" \
+             "${URL}/containerd-shim-runsc-v1" "${URL}/containerd-shim-runsc-v1.sha512"
+        sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512
+        chmod a+rx runsc containerd-shim-runsc-v1
+        mv runsc containerd-shim-runsc-v1 /usr/local/bin/
+      fi
+      # Register runsc as a Docker runtime (writes /etc/docker/daemon.json) and
+      # default the platform to systrap (no KVM in a vz guest).
+      runsc install --runtime=runsc -- --platform=systrap
+      systemctl restart docker
+      runsc --version
+
+probes:
+  - description: "docker + runsc ready"
+    script: |
+      #!/bin/bash
+      set -eux
+      timeout 120 bash -c "until docker info >/dev/null 2>&1 && command -v runsc; do sleep 3; done"

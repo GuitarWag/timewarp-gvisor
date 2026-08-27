@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The pinned gVisor release the clock-warp patch is generated against.
+# Bump this together with gvisor/clockwarp.patch (regenerate via apply-clockwarp.py).
+env:
+  GVISOR_TAG: release-20260622.0
+  # Buildable go-branch snapshot that contains GVISOR_TAG (same pin as gvisor/build-runsc.sh).
+  GVISOR_REF: d10071d635665b840936420353a489ca5f9f250d
+
+jobs:
+  # Fast, always-on checks. These are the real guard rails: the Go modules
+  # build, the scripts lint, and — most importantly — the sentry patch still
+  # applies cleanly to the pinned gVisor tag (catches upstream drift without a
+  # multi-gigabyte runsc build).
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Build and vet authority
+        working-directory: authority
+        run: |
+          go build ./...
+          go vet ./...
+
+      - name: Build and vet victim
+        working-directory: victim
+        run: |
+          go build ./...
+          go vet ./...
+
+      - name: Shellcheck scripts
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          shellcheck --severity=warning scripts/*.sh stack/*.sh gvisor/*.sh
+
+      - name: Patch still applies to pinned gVisor tag
+        run: |
+          git clone --depth 1 --branch "$GVISOR_TAG" \
+            https://github.com/google/gvisor.git /tmp/gvisor-src
+          git -C /tmp/gvisor-src apply --check --verbose \
+            "$GITHUB_WORKSPACE/gvisor/clockwarp.patch"
+          echo "clockwarp.patch applies cleanly to $GVISOR_TAG"
+
+  # Heavy, opt-in end-to-end proof: build a clock-warped runsc and confirm an
+  # unmodified Go binary's timer fires early. Not run on every push — the gVisor
+  # build is large. Trigger manually from the Actions tab.
+  build-runsc:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Build clock-warped runsc (no-bazel module route)
+        run: |
+          set -euxo pipefail
+          OUT="$HOME/runsc-warp" "$GITHUB_WORKSPACE/gvisor/build-runsc.sh"
+
+      - name: Warp an unmodified Go binary and assert the timer fires early
+        run: |
+          set -euxo pipefail
+          ( cd victim && go build -o /tmp/victim . )
+          # 1h timer at 1000x should fire in ~3.6s. Allow generous slack.
+          out=$(sudo TIMER=1h "$HOME/runsc-warp" \
+            --timewarp-multiplier=1000 --platform=systrap --network=none \
+            do /tmp/victim 2>&1 | tee /dev/stderr) || true
+          echo "$out" | grep -q "TIMER FIRED" \
+            && echo "PASS: warped timer fired" \
+            || { echo "FAIL: timer did not fire under warp"; exit 1; }

@@ -1,0 +1,159 @@
+From dadb5f0090a75b45052849c5c0c093ef0553605d Mon Sep 17 00:00:00 2001
+From: Wagner Silva <wagnergreen21@gmail.com>
+Date: Thu, 25 Jun 2026 20:01:46 +0200
+Subject: [PATCH] timewarp: scale sentry clocks via --timewarp-multiplier flag
+
+Scales the sentry's published monotonic + realtime clocks by a runtime
+multiplier so unmodified sandboxed apps (incl. static Go binaries that
+read time via the vDSO) see accelerated time.
+
+The multiplier arrives through a real runsc flag, --timewarp-multiplier,
+which runsc serializes into the boot (sentry) process. Both clock publish
+points are scaled: the vDSO param page (userspace vDSO reads) and
+Timekeeper.GetTime (syscall reads + the sentry timer subsystem), so wall
+clock, monotonic/elapsed, and sleeps/timers all warp together.
+
+Default multiplier 1 = unchanged. Prototype; not for production.
+---
+ pkg/sentry/kernel/timekeeper.go | 52 ++++++++++++++++++++++++++++++---
+ runsc/boot/loader.go            |  1 +
+ runsc/config/config.go          |  3 ++
+ runsc/config/flags.go           |  1 +
+ 4 files changed, 53 insertions(+), 4 deletions(-)
+
+diff --git a/pkg/sentry/kernel/timekeeper.go b/pkg/sentry/kernel/timekeeper.go
+index 75b2986..93c52c1 100644
+--- a/pkg/sentry/kernel/timekeeper.go
++++ b/pkg/sentry/kernel/timekeeper.go
+@@ -16,6 +16,7 @@ package kernel
+ 
+ import (
+ 	"fmt"
++	"strconv"
+ 	"time"
+ 
+ 	"gvisor.dev/gvisor/pkg/atomicbitops"
+@@ -92,6 +93,35 @@ type Timekeeper struct {
+ // NewTimekeeper does not take ownership of paramPage.
+ //
+ // SetClocks must be called on the returned Timekeeper before it is usable.
++// timewarp (prototype): scale the sentry's published clocks by a multiplier so
++// unmodified sandboxed apps see accelerated time. Set from the runsc
++// --timewarp-multiplier flag (propagated to the boot process) before SetClocks.
++var timewarpMul float64 = 1
++
++// SetTimewarpMultiplier sets the global clock multiplier. Called by the boot
++// loader before the timekeeper's clocks are started.
++func SetTimewarpMultiplier(s string) {
++	if v, err := strconv.ParseFloat(s, 64); err == nil && v > 0 {
++		timewarpMul = v
++	}
++}
++
++var (
++	timewarpMonoAnchor int64
++	timewarpRealAnchor int64
++	timewarpOnce       sync.Once
++)
++
++// warpRef rebases a published BaseRef onto the virtual timeline. The large
++// epoch part stays int64; only the (small) delta is scaled in float64.
++func warpRef(baseRef, anchor int64) int64 { return anchor + int64(float64(baseRef-anchor)*timewarpMul) }
++
++// warpFreq divides frequency by the multiplier so each cycle maps to more ns.
++func warpFreq(freq uint64) uint64 { return uint64(float64(freq) / timewarpMul) }
++
++// warpTime scales a computed time value onto the virtual timeline.
++func warpTime(now, anchor int64) int64 { return anchor + int64(float64(now-anchor)*timewarpMul) }
++
+ func NewTimekeeper() *Timekeeper {
+ 	t := Timekeeper{}
+ 	t.realtimeClock = &timekeeperClock{tk: &t, c: sentrytime.Realtime}
+@@ -156,6 +186,12 @@ func (t *Timekeeper) SetClocks(c sentrytime.Clocks, params *VDSOParamPage) {
+ 
+ 	t.monotonicOffset = wantMonotonic - nowMonotonic
+ 
++	timewarpOnce.Do(func() {
++		timewarpRealAnchor = nowRealtime
++		timewarpMonoAnchor = nowMonotonic + t.monotonicOffset
++	})
++	log.Infof("TIMEWARP: multiplier=%v", timewarpMul)
++
+ 	if t.restored == nil {
+ 		// Hold on to the initial "boot" time.
+ 		t.bootTime = ktime.FromNanoseconds(nowRealtime)
+@@ -204,14 +240,14 @@ func (t *Timekeeper) startUpdater(params *VDSOParamPage) {
+ 				if monotonicOk {
+ 					p.monotonicReady = 1
+ 					p.monotonicBaseCycles = int64(monotonicParams.BaseCycles)
+-					p.monotonicBaseRef = int64(monotonicParams.BaseRef) + t.monotonicOffset
+-					p.monotonicFrequency = monotonicParams.Frequency
++					p.monotonicBaseRef = warpRef(int64(monotonicParams.BaseRef)+t.monotonicOffset, timewarpMonoAnchor)
++					p.monotonicFrequency = warpFreq(monotonicParams.Frequency)
+ 				}
+ 				if realtimeOk {
+ 					p.realtimeReady = 1
+ 					p.realtimeBaseCycles = int64(realtimeParams.BaseCycles)
+-					p.realtimeBaseRef = int64(realtimeParams.BaseRef)
+-					p.realtimeFrequency = realtimeParams.Frequency
++					p.realtimeBaseRef = warpRef(int64(realtimeParams.BaseRef), timewarpRealAnchor)
++					p.realtimeFrequency = warpFreq(realtimeParams.Frequency)
+ 				}
+ 				return p
+ 			}); err != nil {
+@@ -291,6 +327,14 @@ func (t *Timekeeper) GetTime(c sentrytime.ClockID) (int64, error) {
+ 			}
+ 		}
+ 	}
++	if err == nil {
++		switch c {
++		case sentrytime.Monotonic:
++			now = warpTime(now, timewarpMonoAnchor)
++		case sentrytime.Realtime:
++			now = warpTime(now, timewarpRealAnchor)
++		}
++	}
+ 	return now, err
+ }
+ 
+diff --git a/runsc/boot/loader.go b/runsc/boot/loader.go
+index 768f712..1d705db 100644
+--- a/runsc/boot/loader.go
++++ b/runsc/boot/loader.go
+@@ -656,6 +656,7 @@ func New(args Args) (*Loader, error) {
+ 	}
+ 
+ 	// Create timekeeper.
++	kernel.SetTimewarpMultiplier(args.Conf.TimewarpMultiplier)
+ 	tk := kernel.NewTimekeeper()
+ 	params := kernel.NewVDSOParamPage(l.k.MemoryFile(), vdso.ParamPage.FileRange())
+ 	tk.SetClocks(time.NewCalibratedClocks(), params)
+diff --git a/runsc/config/config.go b/runsc/config/config.go
+index 7306dab..392ec2d 100644
+--- a/runsc/config/config.go
++++ b/runsc/config/config.go
+@@ -52,6 +52,9 @@ type Config struct {
+ 	// RootDir is the runtime root directory.
+ 	RootDir string `flag:"root"`
+ 
++	// TimewarpMultiplier scales the sandbox clocks (timewarp prototype).
++	TimewarpMultiplier string `flag:"timewarp-multiplier"`
++
+ 	// Traceback changes the Go runtime's traceback level.
+ 	Traceback string `flag:"traceback"`
+ 
+diff --git a/runsc/config/flags.go b/runsc/config/flags.go
+index ecd82ca..9e8c951 100644
+--- a/runsc/config/flags.go
++++ b/runsc/config/flags.go
+@@ -57,6 +57,7 @@ const (
+ 
+ // RegisterFlags registers flags used to populate Config.
+ func RegisterFlags(flagSet *flag.FlagSet) {
++	flagSet.String("timewarp-multiplier", "1", "timewarp prototype: scale sandbox clocks by this factor")
+ 	// Although these flags are not part of the OCI spec, they are used by
+ 	// Docker, and thus should not be changed.
+ 	flagSet.String("root", "", fmt.Sprintf("root directory for storage of container state, defaults are $%s/runsc, %s.", xdgRuntimeDirEnvVar, defaultRootDir))
+-- 
+2.50.1 (Apple Git-155)
+
