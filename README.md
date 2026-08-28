@@ -1,149 +1,143 @@
 # timewarp-gvisor
 
-A prototype of the "spin up a group of containers with one controllable clock"
-idea, built on **gVisor**. The goal: warp time for *unmodified* images — including
-Go binaries like Temporal — with no code changes, by owning time one layer down,
-in gVisor's userspace kernel (the sentry).
+Make time run fast inside a container without changing the image. A patch to
+gVisor's userspace kernel (the sentry) scales the clocks the sandbox sees, so an
+unmodified Postgres, or a static Go binary, believes a day passes every second.
 
-This is the transparent counterpart to the cooperative `sim_now()` demo
-(`../timewarp-demo`). Same three-number clock; here the sandbox inherits it
-instead of the application reading it explicitly.
+Research prototype. It disables real time inside the sandbox, so do not run it
+in production. Apache-2.0, same as gVisor.
 
-> **Scope:** a research prototype for *accelerating* time in tests — running a
-> real stack at, say, one simulated day per real second to exercise scheduler,
-> expiry, retention, and maturity logic without waiting. It modifies gVisor's
-> clocks at build time; it is **not for production**, and the warp is set per
-> sandbox at boot (live, group-wide rate control is on the roadmap below).
-> Licensed Apache-2.0, matching gVisor.
+## What it does
 
-## Why gVisor (and not Kata / libfaketime)
+Start a container with `--timewarp-multiplier=3600` and every clock read inside
+it runs 3600 times faster than the host. `time.Now()`, `clock_gettime`,
+`now()` in SQL, sleeps, timers, cron schedules. They all move together, because
+the sentry owns all of them.
 
-- **libfaketime** intercepts libc time — but Go reads the clock via the vDSO,
-  bypassing libc, so it can't be warped this way.
-- **Kata** gives each pod its own kernel/clock, but needs KVM/nested virtualization
-  (not available through Docker Desktop on Apple Silicon).
-- **gVisor** is a userspace kernel. Its `systrap`/`ptrace` platform needs **no
-  nested virtualization**, and it *provides* the vDSO and *runs* the timer
-  subsystem for the sandbox — so it can warp wall-clock reads, monotonic reads,
-  and sleeps/timers together, for any image. That's why it's the realistic
-  foundation to prototype here.
+Measured results, all with zero changes to the workload:
 
-## Components
+- A Go program's `time.AfterFunc(2h)` fired after 8 real seconds at 1000x.
+- Upstream `postgres:17-alpine`: a 90-day term deposit matured in 91 real seconds
+  at 86400x, on Kubernetes, off plain `now()`.
+- The same Postgres at 3600x runs the demo UI below: daily interest, rollovers,
+  and hourly cron jobs, one simulated hour per real second.
 
-| Dir | What | Status |
-|-----|------|--------|
-| `gvisor/clockwarp.patch` | The sentry patch (pinned to `release-20260622.0`): scales both clocks, adds the `--timewarp-multiplier` flag. CI checks it still applies. | **Works** |
-| `gvisor/apply-clockwarp.py` | Generates/re-ports `clockwarp.patch` by matching source anchors when a gVisor bump moves things. | **Works** |
-| `victim/` | An ordinary, time-warp-unaware Go program: prints wall clock + elapsed, arms a timer. The thing we warp. | **Builds & runs** |
-| `gvisor/build-runsc.sh` | Fetch gVisor, apply patch, build `runsc-warp`. Linux. | Script |
-| `gvisor/run-victim.sh` | Run the victim under the warped `runsc` at a chosen rate. Linux. | Script |
-| `gvisor/PATCH.md` | Design notes: touch-points, transform, the multiplier-channel lesson. | Doc |
-| `authority/` | Clock control-plane *design*: holds `(anchorReal, anchorVirtual, multiplier)`, serves `/now`, `/params`, `/rate`, `/reset`. | Builds & runs; **not yet wired to the sentry** (roadmap) |
+![Demo UI: simulated clock at 3600x next to real time, events per hour, term deposits](docs/stack-ui.png)
 
-## PROVEN (2026-06-16)
+## Why gVisor
 
-The patched `runsc` warps an **unmodified** static Go binary. Under
-`--timewarp-multiplier=1000`, the victim's `time.AfterFunc(2h)` fired in **8 real
-seconds** and `time.Now()` jumped ~2 hours — zero code changes. This is the
-transparent warp libfaketime cannot do (Go bypasses libc via the vDSO).
+A process reads time three ways, and a fake clock has to lie to all three at
+once:
 
-Build + run (inside the Lima VM, no bazel — see `PATCH.md` for why the module
-tree is used):
+| Read | How | Who answers under gVisor |
+|---|---|---|
+| wall clock | vDSO, no syscall | the sentry's vDSO parameter page |
+| monotonic / elapsed | vDSO, no syscall | the sentry's vDSO parameter page |
+| sleep, timer, epoll timeout | syscall | the sentry's timer subsystem |
 
-```bash
-./gvisor/build-runsc.sh           # fetch gVisor, apply clockwarp.patch, build runsc-warp
-RATE=1000 ./gvisor/run-victim.sh  # run the unmodified victim at 1000x
-./gvisor/install-runtimes.sh      # register runsc-warp{,-hour,-fast} as Docker runtimes
-```
+libfaketime hooks libc, and Go does not use libc for time, so it fails on the
+first two rows. Kata gives each pod its own kernel but needs nested
+virtualization, which Docker Desktop on Apple Silicon does not have. gVisor
+provides the vDSO and runs the timers itself, and its `systrap` platform needs
+no KVM. Scale its two clocks and everything above them warps.
 
-`build-runsc.sh` applies the committed `clockwarp.patch` (pinned to
-`release-20260622.0`) and falls back to `apply-clockwarp.py` if the snapshot has
-drifted. Under the hood it is just `go build ./runsc` on a patched module tree.
+The patch is 6 KB. It divides each clock's frequency by the multiplier and
+re-bases its reference point, at the two places the sentry publishes time (the
+vDSO page and `Timekeeper.GetTime`). The multiplier arrives through a real
+`runsc` flag, because that is the only channel that reaches the sentry: it gets a
+clean environment and a restricted mount namespace, so env vars and host files
+never arrive. `gvisor/PATCH.md` has the details.
 
-The multiplier reaches the sentry via the runsc flag (config -> ToFlags -> boot
-process). Env vars and host files do NOT reach the sentry (clean env + restricted
-mount namespace) — that was the key lesson.
+## Quick start
 
-## What works today (runnable on macOS)
-
-```bash
-./scripts/demo.sh
-```
-
-Starts the authority and runs the victim **normally** (real time) — the "before".
-Then bumps the authority to 1000× and shows the virtual clock the sentry would
-serve. This proves the control plane and the workload; it does not warp the victim
-yet (that needs the patched runsc).
-
-## Running real images under gVisor (Lima)
-
-`runsc` is Linux-only, so the build/run happens in a Linux guest. `lima/gvisor.yaml`
-provisions an Ubuntu VM (Apple Virtualization.framework, no nested virt) with
-Docker + gVisor registered as the `runsc` runtime.
+`runsc` runs on Linux only. On macOS everything happens inside a Lima VM
+(Ubuntu, Apple Virtualization.framework, no nested virt). The repo is mounted at
+the same path inside the VM.
 
 ```bash
 limactl start --name=gvisor ./lima/gvisor.yaml
-limactl cp scripts/smoke-test.sh gvisor:/tmp/smoke-test.sh
-limactl shell gvisor -- bash /tmp/smoke-test.sh
+limactl shell gvisor
+
+# once: build the patched runsc and register it as Docker runtimes
+./gvisor/build-runsc.sh           # go build ./runsc on a patched module tree, no bazel
+./gvisor/install-runtimes.sh      # runsc-warp (1000x), runsc-warp-hour (3600x), runsc-warp-fast (86400x)
+
+# the smallest proof: an unmodified Go binary, 1h timer at 1000x
+TIMER=1h RATE=1000 ./gvisor/run-victim.sh
+
+# the demo stack: Postgres at 3600x + a UI on the normal runtime
+bash stack/up.sh                                  # http://localhost:8080 on the host
+CONTAINER=pg TERM_DAYS=2 scripts/e2e-maturity.sh  # 2 simulated days mature in ~50 s
+docker rm -f pg twui
 ```
 
-`scripts/smoke-test.sh` is the go/no-go: it runs the previous stack's real images
-(`postgres`, the Temporal Go binary, `bun`) under `--runtime=runsc` and checks each
-actually works under gVisor — before any sentry patching. Tear down with
-`limactl delete -f gvisor`.
+The rate is fixed when a sandbox boots. `install-runtimes.sh` writes one Docker
+runtime per multiplier into `/etc/docker/daemon.json`; pick the rate by picking
+the runtime.
 
-## Demo stack: unmodified Postgres at 1 hour per second (Lima)
+## On Kubernetes
 
-`stack/` runs upstream `postgres:17-alpine` under the `runsc-warp-hour` runtime
-(3600x) and a small Bun API + UI on the normal runtime that reads the warped
-`now()`. Term deposits accrue daily interest, mature and roll over; sim-time cron
-jobs fire; a live chart shows events per simulated hour.
-
-![Stack UI: simulated clock at 3600x next to real time, events-per-hour chart, term deposits](docs/stack-ui.png)
+`k8s-lab/` does the same on a kind cluster. It copies `runsc-warp` and the gVisor
+containerd shim into the kind nodes, adds a containerd runtime handler whose
+`runsc.toml` carries the multiplier, registers a `RuntimeClass`, and runs the
+Postgres pod on it. The UI runs on the normal runtime next to it.
 
 ```bash
-limactl shell gvisor                # inside the VM, repo is mounted at the same path
-./gvisor/build-runsc.sh && ./gvisor/install-runtimes.sh   # once
-bash stack/up.sh                    # then open http://localhost:8080 on the host
-CONTAINER=pg TERM_DAYS=2 scripts/e2e-maturity.sh   # 2 sim days mature in ~48 s
-docker rm -f pg twui                # tear down
+kind create cluster --name timewarp
+limactl shell gvisor -- bash "$PWD/k8s-lab/build-warp-runtime.sh"
+limactl cp -r gvisor:~/k8s-lab-bin/. k8s-lab/bin/
+KIND_CLUSTER_NAME=timewarp MULTIPLIER=3600 ./k8s-lab/inject-warp-runtime.sh
+KIND_CLUSTER_NAME=timewarp ./k8s-lab/deploy-stack.sh
+NS=timewarp DEPLOY=postgres TERM_DAYS=2 scripts/e2e-maturity.sh
+kubectl port-forward -n timewarp svc/twui 8080:3000
 ```
 
-The rate is fixed when the sandbox boots (`--timewarp-multiplier` in
-`/etc/docker/daemon.json`, written by `install-runtimes.sh`). The `sim_clock`
-row in Postgres only mirrors that number for the UI label; the warp itself
-comes from gVisor.
+Two things bit me there and are worth knowing before you try your own workload.
+Readiness probes must be `tcpSocket` or `httpGet`, because an `exec` probe runs
+inside the sandbox where its 3-second timeout is 35 microseconds real. And
+Postgres drops the odd connection at high rates, since its own
+`authentication_timeout` fires in warped time. `k8s-lab/README.md` lists the
+rest.
 
-## Warping a Kubernetes workload (KinD)
+The lab is deliberately a single Postgres pod. Anything with inter-node clock
+agreement (a distributed database, a gRPC mesh with deadlines) breaks until
+sandboxes can share one anchor. See the roadmap.
 
-`k8s-lab/` runs the warp on a real workload inside a KinD cluster (verified on
-a fresh `kind` cluster, containerd 2.2): it installs `runsc-warp` as a containerd RuntimeClass on the kind nodes
-and moves the local-dev **Postgres** pod onto it, so a 90-day term deposit matures
-in ~90 real seconds off plain `now()`. `k8s-lab/deploy-stack.sh` also runs the
-full `stack/` demo (seeded Postgres + UI) on the cluster. See `k8s-lab/README.md` for the runbook and
-why this is scoped to single-pod Postgres (distributed DBs and the gRPC mesh need
-the group-anchor work first).
+## Layout
 
-## Roadmap
+| Path | What |
+|---|---|
+| `gvisor/clockwarp.patch` | The sentry patch, pinned to gVisor `release-20260622.0`. CI checks it still applies. |
+| `gvisor/apply-clockwarp.py` | Regenerates the patch by matching source anchors after a gVisor bump. |
+| `gvisor/build-runsc.sh`, `install-runtimes.sh`, `run-victim.sh` | Build, register, run. Linux. |
+| `gvisor/PATCH.md` | Design notes and the refresh procedure for a new gVisor tag. |
+| `victim/` | A plain Go program that prints wall clock and elapsed time and arms a timer. |
+| `stack/` | The Docker demo: `schema-native.sql`, `up.sh`, `compose.yml`, and the Bun UI in `stack/ui/`. |
+| `k8s-lab/` | The kind lab: build, inject, `postgres.yaml`, `ui.yaml`, `deploy-stack.sh`, runbook. |
+| `scripts/e2e-maturity.sh` | The one e2e test. Runs against Docker (`CONTAINER=`) or Kubernetes (`NS=`, `DEPLOY=`). |
+| `scripts/smoke-test.sh` | Runs real images under plain `runsc` first, to separate gVisor problems from warp problems. |
+| `authority/` | An HTTP service holding `(anchorReal, anchorVirtual, multiplier)`. Builds and runs, but nothing reads it yet. |
+| `lima/gvisor.yaml` | The VM. |
 
-The static, per-sandbox warp is done and pinned. What turns this from a working
-warp into the "group with one controllable clock" idea:
+## Status and roadmap
 
-1. **Live rate control.** Add a `runsc timewarp <id> --rate N` URPC method
-   (`runsc/boot/controller.go`) so the multiplier can change on a running sandbox;
-   the next calibration cycle (~1s) picks it up. See PATCH.md.
-2. **Group anchor.** A `--timewarp-anchor` flag so several sandboxes share one
-   virtual epoch and their wall clocks *agree* at high multipliers, not just each
-   drifting from its own boot time.
-3. **Wire the authority in.** Have the control plane in `authority/` actually feed
-   the triple to the sandboxes (today it serves the design but nothing reads it).
-4. **Prebuilt artifact.** Ship a `runsc-warp` release binary so the first run
-   doesn't require a from-source build.
+Done: the per-sandbox warp, verified on Docker and Kubernetes, pinned to a
+gVisor tag, with CI that fails when upstream drift breaks the patch.
 
-Honest status: the transparent warp is real, verified, pinned, and CI-guarded
-against patch drift. The remaining work is the control plane around it.
+Not done, in the order I would do it:
+
+1. Live rate changes. A `runsc timewarp <id> --rate N` control method so the
+   multiplier can change on a running sandbox. The calibration loop already
+   republishes the clocks every second, so it would pick a new value up on the
+   next cycle.
+2. A shared anchor. A `--timewarp-anchor` flag so several sandboxes agree on the
+   wall clock instead of each drifting from its own boot time. This is what
+   distributed workloads need.
+3. Wire `authority/` in, so the rate and anchor come from one service rather than
+   from a flag in `daemon.json`.
+4. A prebuilt `runsc-warp` release, so the first run does not need a 5-minute
+   build.
 
 ## License
 
-Apache-2.0 (see `LICENSE`), matching gVisor. This is a research prototype that
-disables real time inside the sandbox — do not run it in production.
+Apache-2.0, see `LICENSE`.
