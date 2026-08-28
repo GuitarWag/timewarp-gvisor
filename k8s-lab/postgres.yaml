@@ -1,0 +1,66 @@
+# Unmodified Postgres on the clock-warped RuntimeClass. Self-contained target
+# for the lab when the cluster has no Postgres of its own. The only warp-related
+# line is runtimeClassName; the image is upstream postgres:17-alpine.
+#
+# The optional "timewarp-schema" ConfigMap (created by deploy-stack.sh from
+# stack/schema-native.sql) seeds the demo database the UI reads.
+#
+#   kubectl apply -f k8s-lab/postgres.yaml
+#   NS=timewarp DEPLOY=postgres ./scripts/e2e-maturity.sh
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: timewarp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: timewarp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      runtimeClassName: runsc-warp
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - name: POSTGRES_PASSWORD
+              value: postgres
+            - name: POSTGRES_DB
+              value: timewarp
+          volumeMounts:
+            - name: schema
+              mountPath: /docker-entrypoint-initdb.d
+          ports:
+            - containerPort: 5432
+          # tcpSocket, not an exec probe: the kubelet runs it from outside the
+          # sandbox in real time. pg_isready inside the sandbox would time out
+          # in warped time (3 s at 86400x is 35 us).
+          readinessProbe:
+            tcpSocket:
+              port: 5432
+            periodSeconds: 2
+      volumes:
+        - name: schema
+          configMap:
+            name: timewarp-schema
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: timewarp
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432

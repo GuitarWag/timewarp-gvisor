@@ -1,9 +1,9 @@
 -- Time-warp maturity probe. Runs entirely off the server clock (now()), so when
--- the Postgres pod is on the runsc-warp runtime, a 90-day term "matures" in real
--- seconds with zero application changes.
+-- Postgres runs on the runsc-warp runtime (Docker or Kubernetes), a term
+-- "matures" in real seconds with zero application changes.
 CREATE SCHEMA IF NOT EXISTS timewarp_lab;
 
-DROP TABLE IF EXISTS timewarp_lab.deposits;
+DROP TABLE IF EXISTS timewarp_lab.deposits CASCADE;   -- also drops the status view
 CREATE TABLE timewarp_lab.deposits (
   id         bigserial PRIMARY KEY,
   label      text        NOT NULL,
@@ -11,8 +11,7 @@ CREATE TABLE timewarp_lab.deposits (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-INSERT INTO timewarp_lab.deposits (label, term_days)
-VALUES ('90-day term deposit', 90);
+-- e2e-maturity.sh inserts the deposit (TERM_DAYS).
 
 -- Status view: server clock, maturity date, and whether it has matured yet.
 CREATE OR REPLACE VIEW timewarp_lab.status AS

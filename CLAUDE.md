@@ -36,6 +36,7 @@ limactl start --name=gvisor ./lima/gvisor.yaml   # Ubuntu VM, Docker + runsc, no
 RATE=1000 ./gvisor/run-victim.sh                  # (in VM) run the unmodified victim warped
 ./gvisor/install-runtimes.sh                      # (in VM) register runsc-warp{,-hour,-fast} Docker runtimes
 bash stack/up.sh                                  # (in VM) Postgres at 3600x + UI on host :8080
+CONTAINER=pg TERM_DAYS=2 scripts/e2e-maturity.sh  # e2e against Docker; NS=timewarp DEPLOY=postgres for k8s
 scripts/smoke-test.sh                             # (in VM) go/no-go: real images under plain runsc
 ```
 
@@ -48,7 +49,7 @@ The heavy end-to-end CI job (`build-runsc`) is opt-in via workflow_dispatch only
 - **`victim/`** — an ordinary, warp-unaware Go program exercising the three reads that must warp together (wall clock, elapsed, timer). The test target.
 - **`authority/`** — HTTP control plane holding `(anchorReal, anchorVirtual, multiplier)`; `virtual(t) = anchorVirtual + (t - anchorReal) * multiplier`. Builds and runs, but nothing reads it yet — the sentry gets its multiplier from the runsc flag, not from here.
 - **`stack/`** — Docker demo in the VM: unmodified Postgres under the warped runtime (`runsc-warp-hour`, 3600x = 1 sim hour per real second), a normal-runtime UI (`stack/ui/`, Bun, built as `twui:latest` by `stack/up.sh`) reading its warped `now()`.
-- **`k8s-lab/`** — the warp on a real workload: installs `runsc-warp` as a containerd RuntimeClass on KinD nodes and moves the local-dev Postgres pod onto it (90-day deposit matures in ~90s). Deliberately single-pod-Postgres only: distributed DBs and the gRPC mesh need the shared-anchor work first. Runbook in `k8s-lab/README.md`.
+- **`k8s-lab/`** — the warp on a real workload: installs `runsc-warp` as a containerd RuntimeClass on KinD nodes and runs an unmodified Postgres pod on it (`postgres.yaml`; 90-day deposit matures in ~90s, verified 2026-08-28). `deploy-stack.sh` + `ui.yaml` run the `stack/` demo (seeded Postgres + UI) on the cluster at 3600x. Probes must be `tcpSocket`, not `exec`: exec probes run inside the warped sandbox and time out. Deliberately single-pod-Postgres only: distributed DBs and the gRPC mesh need the shared-anchor work first. Runbook in `k8s-lab/README.md`.
 
 ## Constraints that shape changes
 

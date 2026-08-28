@@ -47,4 +47,4 @@ echo
 echo "Postgres is now warped. Verify the pod runs under gVisor (expect 'runsc-warp'"
 echo "and a sandboxed 'dmesg' that mentions gVisor):"
 echo "  kubectl get pods -n $NS -o jsonpath='{.items[*].spec.runtimeClassName}'; echo"
-echo "Then run: NS=$NS DEPLOY=$DEPLOY ./e2e-maturity-test.sh"
+echo "Then run: NS=$NS DEPLOY=$DEPLOY ./scripts/e2e-maturity.sh"

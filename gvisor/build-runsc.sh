@@ -19,6 +19,7 @@ GVISOR_TAG="${GVISOR_TAG:-release-20260622.0}"   # the tag clockwarp.patch is ge
 # @go is a moving target and drifted past the patch on 2026-08-27; pin instead.
 GVISOR_REF="${GVISOR_REF:-d10071d635665b840936420353a489ca5f9f250d}"
 OUT="${OUT:-$HERE/runsc-warp}"
+SHIM_OUT="${SHIM_OUT:-}"   # optional: also build containerd-shim-runsc-v1 here (for Kubernetes)
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "runsc builds and runs on Linux only. Run this inside a Linux VM/container." >&2
@@ -50,5 +51,9 @@ fi
 
 echo "==> Building runsc"
 ( cd "$SRC" && go build -o "$OUT" ./runsc )
-echo "==> Built: $OUT"
+if [[ -n "$SHIM_OUT" ]]; then
+  echo "==> Building containerd-shim-runsc-v1"
+  ( cd "$SRC" && go build -o "$SHIM_OUT" ./shim )
+fi
+echo "==> Built: $OUT ${SHIM_OUT:+$SHIM_OUT}"
 "$OUT" --version

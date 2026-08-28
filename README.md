@@ -105,6 +105,7 @@ jobs fire; a live chart shows events per simulated hour.
 limactl shell gvisor                # inside the VM, repo is mounted at the same path
 ./gvisor/build-runsc.sh && ./gvisor/install-runtimes.sh   # once
 bash stack/up.sh                    # then open http://localhost:8080 on the host
+CONTAINER=pg TERM_DAYS=2 scripts/e2e-maturity.sh   # 2 sim days mature in ~48 s
 docker rm -f pg twui                # tear down
 ```
 
@@ -115,9 +116,11 @@ comes from gVisor.
 
 ## Warping a Kubernetes workload (KinD)
 
-`k8s-lab/` runs the warp on a real workload inside a KinD cluster: it installs `runsc-warp` as a containerd RuntimeClass on the kind nodes
+`k8s-lab/` runs the warp on a real workload inside a KinD cluster (verified on
+a fresh `kind` cluster, containerd 2.2): it installs `runsc-warp` as a containerd RuntimeClass on the kind nodes
 and moves the local-dev **Postgres** pod onto it, so a 90-day term deposit matures
-in ~90 real seconds off plain `now()`. See `k8s-lab/README.md` for the runbook and
+in ~90 real seconds off plain `now()`. `k8s-lab/deploy-stack.sh` also runs the
+full `stack/` demo (seeded Postgres + UI) on the cluster. See `k8s-lab/README.md` for the runbook and
 why this is scoped to single-pod Postgres (distributed DBs and the gRPC mesh need
 the group-anchor work first).
 

@@ -1,44 +1,27 @@
 #!/usr/bin/env bash
-# Build the clock-warped runsc AND the gVisor containerd shim, for use as a
-# Kubernetes RuntimeClass on a KinD cluster. Linux only — run inside the
-# Lima VM (lima/gvisor.yaml). Outputs both binaries to k8s-lab/bin/, matching the
-# node arch (arm64 on Apple Silicon).
+# Build the clock-warped runsc AND the gVisor containerd shim for a Kubernetes
+# RuntimeClass on a KinD cluster. Linux only: run inside the Lima VM. Both
+# binaries match the node arch (arm64 on Apple Silicon).
 #
-#   limactl shell gvisor -- bash /path/to/k8s-lab/build-warp-runtime.sh
+#   limactl shell gvisor -- bash "$PWD/k8s-lab/build-warp-runtime.sh"
 #
-# Then copy k8s-lab/bin/ to the host and run inject-warp-runtime.sh.
+# Output goes to k8s-lab/bin/. If the repo mount is read-only in the VM, it
+# goes to ~/k8s-lab-bin instead and the script prints the limactl cp to run.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GVISOR_TAG="${GVISOR_TAG:-release-20260622.0}"   # tag clockwarp.patch is pinned to
-GVISOR_REF="${GVISOR_REF:-go}"                   # buildable module snapshot
-OUT="$HERE/bin"
-
-if [[ "$(uname -s)" != "Linux" ]]; then
-  echo "Build on Linux (the kind node arch). Use the Lima VM: lima/gvisor.yaml" >&2
-  exit 1
+OUT="${OUT:-$HERE/bin}"
+if ! mkdir -p "$OUT" 2>/dev/null || [[ ! -w "$OUT" ]]; then
+  OUT="$HOME/k8s-lab-bin"; mkdir -p "$OUT"
+  COPY_HINT=1
 fi
 
-mkdir -p "$OUT"
-BUILD="$(mktemp -d)"
-trap 'rm -rf "$BUILD"' EXIT
+BIN_DIR="$OUT"
+OUT="$BIN_DIR/runsc-warp" SHIM_OUT="$BIN_DIR/containerd-shim-runsc-v1" "$HERE/../gvisor/build-runsc.sh"
 
-echo "==> Fetching buildable gVisor tree (@$GVISOR_REF)"
-GOBIN="$BUILD/gobin" go install "gvisor.dev/gvisor/runsc@$GVISOR_REF"
-SRC="$BUILD/gvisor"
-cp -r "$(go env GOMODCACHE)"/gvisor.dev/gvisor@*/. "$SRC"
-chmod -R u+w "$SRC"
-
-echo "==> Applying clock-warp patch (pinned to $GVISOR_TAG)"
-if ! git -C "$SRC" apply "$HERE/../gvisor/clockwarp.patch" 2>/dev/null; then
-  echo "    static patch did not apply to @$GVISOR_REF; re-porting via apply-clockwarp.py"
-  python3 "$HERE/../gvisor/apply-clockwarp.py" "$SRC"
-fi
-
-echo "==> Building runsc-warp and containerd-shim-runsc-v1"
-( cd "$SRC" && go build -o "$OUT/runsc-warp" ./runsc )
-( cd "$SRC" && go build -o "$OUT/containerd-shim-runsc-v1" ./shim )
-
-echo "==> Built:"
 ls -la "$OUT"
-"$OUT/runsc-warp" --version
+if [[ -n "${COPY_HINT:-}" ]]; then
+  echo
+  echo "Repo mount is read-only here. On the host run:"
+  echo "  limactl cp -r gvisor:$BIN_DIR/. k8s-lab/bin/"
+fi

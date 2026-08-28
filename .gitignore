@@ -16,3 +16,6 @@ gvisor-build/
 # Editor / OS
 .DS_Store
 *.swp
+
+# Kubernetes lab binaries (built in the VM)
+k8s-lab/bin/
