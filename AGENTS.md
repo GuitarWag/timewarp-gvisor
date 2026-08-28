@@ -15,7 +15,7 @@ There is no Makefile and no test suite; CI (`.github/workflows/ci.yml`) is the c
 ```bash
 (cd authority && go build ./... && go vet ./...)
 (cd victim && go build ./... && go vet ./...)
-shellcheck --severity=warning scripts/*.sh stack/*.sh gvisor/*.sh
+shellcheck --severity=warning scripts/*.sh stack/*.sh gvisor/*.sh k8s-lab/*.sh
 
 # The most important CI check — the sentry patch still applies to the pinned tag:
 git clone --depth 1 --branch release-20260622.0 https://github.com/google/gvisor.git /tmp/gvisor-src
@@ -40,7 +40,19 @@ CONTAINER=pg TERM_DAYS=2 scripts/e2e-maturity.sh  # e2e against Docker; NS=timew
 scripts/smoke-test.sh                             # (in VM) go/no-go: real images under plain runsc
 ```
 
-The heavy end-to-end CI job (`build-runsc`) is opt-in via workflow_dispatch only.
+Kubernetes lab (host side, needs `kind`, `kubectl`, Docker; binaries come from the VM):
+
+```bash
+kind create cluster --name timewarp                                  # never reuse a cluster you care about
+limactl shell gvisor -- bash "$PWD/k8s-lab/build-warp-runtime.sh"    # runsc-warp + containerd shim, to ~/k8s-lab-bin (repo mount is read-only in the VM)
+limactl cp -r gvisor:~/k8s-lab-bin/. k8s-lab/bin/                    # k8s-lab/bin is gitignored
+KIND_CLUSTER_NAME=timewarp MULTIPLIER=3600 ./k8s-lab/inject-warp-runtime.sh
+KIND_CLUSTER_NAME=timewarp ./k8s-lab/deploy-stack.sh                 # seeded Postgres (warped) + UI (normal runtime)
+NS=timewarp DEPLOY=postgres TERM_DAYS=2 scripts/e2e-maturity.sh
+kind delete cluster --name timewarp
+```
+
+The heavy end-to-end CI job (`build-runsc`) is opt-in via workflow_dispatch only. Remote: `origin` is `github.com/GuitarWag/timewarp-gvisor` (public, personal account).
 
 ## Architecture
 
@@ -55,5 +67,7 @@ The heavy end-to-end CI job (`build-runsc`) is opt-in via workflow_dispatch only
 
 - **The pinned tag lives in three places** and must move together: `gvisor/clockwarp.patch` (regenerate), `gvisor/build-runsc.sh` (`GVISOR_TAG` + `GVISOR_REF`), and `.github/workflows/ci.yml` (`GVISOR_TAG` + `GVISOR_REF`). Refresh procedure is at the bottom of `gvisor/PATCH.md`.
 - **The multiplier reaches the sentry only via the runsc flag** (config → ToFlags → boot process). Env vars and host files do NOT reach the sentry — clean env, restricted mount namespace. This was the hard-won lesson; don't try to deliver config another way.
-- **The build avoids bazel.** The module-proxy `@go` version of gVisor is a fully buildable tree (generated protos included); the raw git `go` branch is not. `build-runsc.sh` is just `go build ./runsc` on a patched copy of that tree.
+- **The build avoids bazel.** Only the module-proxy snapshots of gVisor's `go` branch are `go build`-able (generated protos included); the release tag tree and the raw git branch are not. `@go` is a moving target and drifted past the patch on 2026-08-27, so `build-runsc.sh` pins `GVISOR_REF` to the first `go`-branch snapshot that contains `GVISOR_TAG`, and uses `go mod download -json` to find the exact cache dir. `SHIM_OUT=` also builds `containerd-shim-runsc-v1` from the same patched tree.
+- **Anything that runs inside the sandbox runs in warped time**, including things you think of as infrastructure: kubelet `exec` probes (`pg_isready` with a 3 s timeout fails after 35 us real at 86400x; use `tcpSocket`/`httpGet`), Postgres' `authentication_timeout` and autovacuum deadlines (connections drop now and then; `scripts/e2e-maturity.sh` retries), the UI's DB pool (short `idleTimeout`/`maxLifetime` in `stack/ui/server.ts`).
+- **kind node quirks.** `docker cp` into a node's `/tmp` (tmpfs) is silently lost; pipe over `docker exec -i` instead. The gVisor shim ignored `BinaryName` from containerd options (containerd 2.2, v2 config), so `binary_name` goes in `/etc/containerd/runsc.toml` plus a `runsc -> runsc-warp` symlink. macOS bash 3.2 has no `mapfile`.
 - **Warping is per-sandbox and set at boot.** Each warped sandbox drifts from its own start time; two warped pods do not agree on wall clock at high multipliers until the `--timewarp-anchor` roadmap item exists. Don't design anything assuming group-consistent clocks yet.
