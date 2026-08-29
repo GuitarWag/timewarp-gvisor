@@ -138,6 +138,9 @@ Not done, in the order I would do it:
 4. A prebuilt `runsc-warp` release, so the first run does not need a 5-minute
    build.
 
+Next experiment, planned in `docs/temporal-plan.md`: a Temporal server and
+worker in warped sandboxes, so `workflow.Sleep(90d)` fires in seconds.
+
 ## License
 
 Apache-2.0, see `LICENSE`.

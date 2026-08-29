@@ -63,6 +63,8 @@ The heavy end-to-end CI job (`build-runsc`) is opt-in via workflow_dispatch only
 - **`stack/`** — Docker demo in the VM: unmodified Postgres under the warped runtime (`runsc-warp-hour`, 3600x = 1 sim hour per real second), a normal-runtime UI (`stack/ui/`, Bun, built as `twui:latest` by `stack/up.sh`) reading its warped `now()`.
 - **`k8s-lab/`** — the warp on a real workload: installs `runsc-warp` as a containerd RuntimeClass on KinD nodes and runs an unmodified Postgres pod on it (`postgres.yaml`; 90-day deposit matures in ~90s, verified 2026-08-28). `deploy-stack.sh` + `ui.yaml` run the `stack/` demo (seeded Postgres + UI) on the cluster at 3600x. Probes must be `tcpSocket`, not `exec`: exec probes run inside the warped sandbox and time out. Deliberately single-pod-Postgres only: distributed DBs and the gRPC mesh need the shared-anchor work first. Runbook in `k8s-lab/README.md`.
 
+- **`docs/temporal-plan.md`** — the plan for a Temporal worker + sample jobs on the warped clock. Key rule there: every gRPC edge must stay inside one clock domain (the `grpc-timeout` header is interpreted by the receiver's clock), which is why the UI talks to the worker over plain HTTP (`WORKER_URL/start`) and never to Temporal directly.
+
 ## Constraints that shape changes
 
 - **The pinned tag lives in three places** and must move together: `gvisor/clockwarp.patch` (regenerate), `gvisor/build-runsc.sh` (`GVISOR_TAG` + `GVISOR_REF`), and `.github/workflows/ci.yml` (`GVISOR_TAG` + `GVISOR_REF`). Refresh procedure is at the bottom of `gvisor/PATCH.md`.
