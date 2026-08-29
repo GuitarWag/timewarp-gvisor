@@ -33,31 +33,55 @@ Measured results, all with zero changes to the workload:
 
 The bank, from the customer's side (`stack/bank`, `docs/bank-plan.md`):
 
-![Savings account: balance, interest earned this month, balance line, ledger](docs/bank-ui.png)
+<img src="docs/bank-ui.png" alt="Savings account: balance 1,003.95, interest earned this month 3.09 paying on 1 Nov, balance line over 57 days, ledger with two monthly interest postings" width="465">
+
+## How it works
+
+```mermaid
+flowchart LR
+  subgraph host["Host (Linux VM or kind node)"]
+    D["Docker / containerd<br/>runtime: runsc-warp<br/>--timewarp-multiplier=N<br/>--timewarp-delay=10s"]
+  end
+  subgraph sandbox["gVisor sandbox (one clock)"]
+    S["sentry (patched)<br/>Timekeeper scales both clocks:<br/>freq / N, BaseRef re-based"]
+    V["vDSO param page"]
+    T["timer subsystem"]
+    A["unmodified app<br/>postgres · Go binary · Temporal"]
+    S --> V
+    S --> T
+    V -- "clock_gettime via vDSO<br/>(time.Now, now())" --> A
+    T -- "nanosleep · timers · epoll timeouts<br/>(time.AfterFunc, cron)" --> A
+  end
+  D -- "flag travels into the boot process" --> S
+```
+
+The multiplier arrives through a real `runsc` flag, because that is the only
+channel that reaches the sentry: it gets a clean environment and a restricted
+mount namespace, so env vars and host files never arrive. For the first
+`--timewarp-delay` seconds the clocks run at 1x so services with start-up
+deadlines can come up; after that the switch to `N` is continuous.
+
+The demos keep the warped things behind one clock and let only plain SQL or
+HTTP cross into real time. gRPC never crosses, because its deadline header is
+read on the receiver's clock:
+
+```mermaid
+flowchart TB
+  subgraph real["normal runtime · real time"]
+    UI["Bun UI / Go bank server<br/>every date read from SQL now()"]
+  end
+  subgraph pg["runsc-warp-hour · 3600x  (bank: runsc-warp-5h · 18000x)"]
+    PG["postgres:17-alpine<br/>deposits · interest · cron · ledger"]
+  end
+  subgraph tp["runsc-warp-temporal · 30x"]
+    W["worker (Go SDK)"] -- gRPC --> TS["temporal server start-dev"]
+  end
+  UI -- SQL --> PG
+  UI -- "HTTP /start" --> W
+  W -- SQL --> PG
+```
 
 ## Why gVisor
-
-A process reads time three ways, and a fake clock has to lie to all three at
-once:
-
-| Read | How | Who answers under gVisor |
-|---|---|---|
-| wall clock | vDSO, no syscall | the sentry's vDSO parameter page |
-| monotonic / elapsed | vDSO, no syscall | the sentry's vDSO parameter page |
-| sleep, timer, epoll timeout | syscall | the sentry's timer subsystem |
-
-libfaketime hooks libc, and Go does not use libc for time, so it fails on the
-first two rows. Kata gives each pod its own kernel but needs nested
-virtualization, which Docker Desktop on Apple Silicon does not have. gVisor
-provides the vDSO and runs the timers itself, and its `systrap` platform needs
-no KVM. Scale its two clocks and everything above them warps.
-
-The patch is 6 KB. It divides each clock's frequency by the multiplier and
-re-bases its reference point, at the two places the sentry publishes time (the
-vDSO page and `Timekeeper.GetTime`). The multiplier arrives through a real
-`runsc` flag, because that is the only channel that reaches the sentry: it gets a
-clean environment and a restricted mount namespace, so env vars and host files
-never arrive. `gvisor/PATCH.md` has the details.
 
 ## Quick start
 
