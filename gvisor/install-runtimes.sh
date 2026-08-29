@@ -9,6 +9,7 @@
 #   runsc-warp        1000    (1000x, the victim demo)
 #   runsc-warp-hour   3600    (1 sim hour per real second, the default for stack/)
 #   runsc-warp-fast   86400   (1 sim day per real second)
+#   runsc-warp-5h     18000   (5 sim hours per real second, the bank demo in stack/bank)
 #   runsc-warp-temporal  30   (the highest rate the Temporal dev server stays healthy at;
 #                              60-100x is flaky, >=200x fails; see docs/temporal-plan.md)
 # Every runtime also gets --timewarp-delay=$TIMEWARP_DELAY (default 10s): the
@@ -28,7 +29,7 @@ done
 
 sudo install -m755 "$RUNSC" /usr/local/bin/runsc-warp
 
-for spec in runsc-warp:1000 runsc-warp-hour:3600 runsc-warp-fast:86400 runsc-warp-temporal:30; do
+for spec in runsc-warp:1000 runsc-warp-hour:3600 runsc-warp-fast:86400 runsc-warp-temporal:30 runsc-warp-5h:18000; do
   name="${spec%%:*}"; mult="${spec##*:}"
   sudo /usr/local/bin/runsc-warp install --runtime="$name" -- \
     --platform=systrap --timewarp-multiplier="$mult" --timewarp-delay="$TIMEWARP_DELAY"

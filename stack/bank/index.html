@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Everyday Savings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg: #F5F8F6;        /* cool, green-biased paper */
+    --card: #FFFFFF;
+    --line: #DDE5E0;
+    --ink: #14201A;
+    --muted: #5C6E65;
+    --accent: #147A4F;    /* deep green: the one accent */
+    --accent-soft: #E3F1EA;
+    --pending: #A8721A;   /* amber: interest earned, not yet posted */
+    --pending-soft: #F7EEDC;
+    --chart-line: #147A4F;
+    --chart-fill: rgba(20,122,79,.12);
+    --grid: #E7EDE9;
+    --focus: #2F8F66;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0F1613; --card: #16201B; --line: #26332C; --ink: #E8EFEA; --muted: #97A69E;
+      --accent: #3FA377; --accent-soft: #163526; --pending: #C99640; --pending-soft: #2E2612;
+      --chart-line: #3FA377; --chart-fill: rgba(63,163,119,.16); --grid: #1F2A24; --focus: #6FCDA2;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0F1613; --card: #16201B; --line: #26332C; --ink: #E8EFEA; --muted: #97A69E;
+    --accent: #3FA377; --accent-soft: #163526; --pending: #C99640; --pending-soft: #2E2612;
+    --chart-line: #3FA377; --chart-fill: rgba(63,163,119,.16); --grid: #1F2A24; --focus: #6FCDA2;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body { font: 15px/1.5 Manrope, system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+  .num { font-family: "DM Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+  .app { max-width: 460px; margin: 0 auto; padding: 20px 18px 48px; display: grid; gap: 14px; }
+
+  header { display: flex; justify-content: space-between; align-items: flex-end; padding: 6px 2px 4px; }
+  header .hello { font-weight: 700; font-size: 18px; letter-spacing: -.01em; }
+  header .date { color: var(--muted); font-size: 12px; text-align: right; line-height: 1.35; }
+  header .date b { color: var(--ink); font-weight: 500; }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  .label { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+
+  .hero .label { margin-bottom: 8px; }
+  .hero .acct { display: flex; justify-content: space-between; color: var(--muted); font-size: 12.5px; margin-bottom: 14px; }
+  .hero .balance { font-size: 40px; font-weight: 500; letter-spacing: -.02em; line-height: 1.05; }
+  .hero .balance small { font-size: 22px; color: var(--muted); font-weight: 400; }
+  .hero .meta { display: flex; gap: 18px; margin-top: 14px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+  .hero .meta b { color: var(--ink); font-weight: 600; }
+  .actions { display: flex; gap: 8px; margin-top: 16px; }
+  button {
+    font: inherit; font-weight: 600; font-size: 14px; border-radius: 10px; padding: 10px 14px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  button:disabled { opacity: .55; cursor: default; }
+
+  .pending { display: grid; gap: 10px; }
+  .pending .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .pending .amt { font-size: 22px; font-weight: 500; color: var(--pending); }
+  .pending .when { color: var(--muted); font-size: 13px; text-align: right; }
+  .pending .when b { color: var(--ink); font-weight: 600; }
+  .bar { height: 6px; background: var(--pending-soft); border-radius: 4px; overflow: hidden; }
+  .bar > span { display: block; height: 100%; background: var(--pending); border-radius: 4px; transition: width .3s linear; }
+  .pending .foot { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+
+  .chart-card .head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  .chart-card .head span { color: var(--muted); font-size: 12.5px; }
+  .chart-wrap { position: relative; }
+  canvas { width: 100%; height: 170px; display: block; }
+  .tip {
+    position: absolute; pointer-events: none; display: none; background: var(--ink); color: var(--bg);
+    font-size: 12px; padding: 6px 9px; border-radius: 8px; white-space: nowrap; transform: translate(-50%, -100%);
+  }
+
+  .ledger h2 { font-size: 15px; font-weight: 700; margin: 0 0 4px; }
+  .month { margin-top: 12px; }
+  .month .label { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .tx { display: grid; grid-template-columns: 1fr auto; gap: 2px 14px; padding: 11px 0; border-bottom: 1px solid var(--line); align-items: center; }
+  .tx:last-child { border-bottom: 0; }
+  .tx .desc { font-weight: 600; font-size: 14px; }
+  .tx .sub { color: var(--muted); font-size: 12px; }
+  .tx .amt { text-align: right; font-weight: 500; font-size: 15px; color: var(--ink); }
+  .tx .amt.credit { color: var(--accent); }
+  .tx .bal { text-align: right; color: var(--muted); font-size: 12px; }
+  .tag { display: inline-block; font-size: 10.5px; padding: 1px 7px; border-radius: 999px; margin-left: 6px; vertical-align: 1px;
+         background: var(--accent-soft); color: var(--accent); font-weight: 600; letter-spacing: .02em; }
+  .tx.new { animation: appear .6s ease; }
+  @keyframes appear { from { background: var(--accent-soft); } }
+  @media (prefers-reduced-motion: reduce) { .tx.new { animation: none; } .bar > span { transition: none; } }
+
+  footer { color: var(--muted); font-size: 11.5px; text-align: center; line-height: 1.5; padding-top: 6px; }
+  footer b { color: var(--ink); font-weight: 500; }
+  .sr { position: absolute; left: -9999px; }
+</style>
+</head>
+<body>
+<main class="app">
+  <header>
+    <div class="hello" id="hello">Good day</div>
+    <div class="date">Account date<br><b class="num" id="acctDate">—</b></div>
+  </header>
+
+  <section class="card hero" aria-labelledby="balLabel">
+    <div class="label" id="balLabel">Available balance</div>
+    <div class="acct"><span id="acctName">Everyday Savings</span><span class="num" id="acctNo"></span></div>
+    <div class="balance num" id="balance">—</div>
+    <div class="meta">
+      <span>APY <b class="num" id="apy">—</b></span>
+      <span>Interest earned to date <b class="num" id="toDate">—</b></span>
+    </div>
+    <div class="actions">
+      <button class="primary" id="addMoney">Add money</button>
+      <button id="add100">+ 100.00</button>
+    </div>
+  </section>
+
+  <section class="card pending" aria-labelledby="pendLabel">
+    <div class="label" id="pendLabel">Interest earned this month</div>
+    <div class="row">
+      <div class="amt num" id="accrued">—</div>
+      <div class="when">Pays on <b class="num" id="nextPost">—</b></div>
+    </div>
+    <div class="bar" aria-hidden="true"><span id="monthBar" style="width:0%"></span></div>
+    <div class="foot"><span id="monthName">—</span><span id="daysLeft">—</span></div>
+  </section>
+
+  <section class="card chart-card" aria-labelledby="chartLabel">
+    <div class="head"><div class="label" id="chartLabel">Balance</div><span id="chartRange">—</span></div>
+    <div class="chart-wrap">
+      <canvas id="chart" role="img" aria-label="Balance over time, one point per day"></canvas>
+      <div class="tip num" id="tip"></div>
+    </div>
+  </section>
+
+  <section class="card ledger" aria-labelledby="ledgerLabel">
+    <h2 id="ledgerLabel">Transactions</h2>
+    <div id="months"></div>
+  </section>
+
+  <footer>Demo account. The bank runs on an accelerated clock: <b class="num" id="rate">5 hours</b> pass every real second.<br>
+    Real time <b class="num" id="realTime">—</b></footer>
+</main>
+
+<script type="module">
+const $ = id => document.getElementById(id);
+const money = v => Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtDate = d => new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+const fmtDay  = d => new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
+const DAY = 86400000;
+
+let account = null, series = [], txs = [], seenTx = new Set();
+
+async function loadAccount() {
+  const [a] = await fetch("/api/account").then(r => r.json());
+  account = a;
+  const h = new Date(a.now).getHours();
+  $("hello").textContent = (h < 12 ? "Good morning, " : h < 18 ? "Good afternoon, " : "Good evening, ") + a.owner;
+  $("acctDate").textContent = fmtDate(a.now);
+  $("acctName").textContent = a.name;
+  $("acctNo").textContent = a.number;
+  const [whole, cents] = money(a.balance).split(".");
+  $("balance").innerHTML = `${whole}<small>.${cents}</small>`;
+  $("apy").textContent = (Number(a.apy) * 100).toFixed(2) + "%";
+  $("toDate").textContent = money(a.interest_to_date);
+  $("accrued").textContent = money(a.accrued);
+  $("nextPost").textContent = fmtDate(a.next_posting);
+
+  const start = new Date(a.month_start).getTime(), end = new Date(a.next_posting).getTime(), now = new Date(a.now).getTime();
+  const pct = Math.max(0, Math.min(100, (now - start) / (end - start) * 100));
+  $("monthBar").style.width = pct + "%";
+  $("monthName").textContent = new Date(a.now).toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  const left = Math.ceil((end - now) / DAY);
+  $("daysLeft").textContent = left === 1 ? "1 day left" : `${left} days left`;
+}
+
+async function loadTransactions() {
+  txs = await fetch("/api/transactions").then(r => r.json());
+  const groups = new Map();
+  for (const t of txs) {
+    const k = new Date(t.posted_at).toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(t);
+  }
+  const first = seenTx.size === 0;
+  $("months").innerHTML = [...groups].map(([m, rows]) => `
+    <div class="month"><div class="label">${m}</div>
+      ${rows.map(t => `
+        <div class="tx ${!first && !seenTx.has(t.id) ? "new" : ""}">
+          <div class="desc">${t.description}${t.kind === "interest" ? '<span class="tag">Interest</span>' : ""}</div>
+          <div class="amt num credit">+${money(t.amount)}</div>
+          <div class="sub num">${fmtDate(t.posted_at)}</div>
+          <div class="bal num">Balance ${money(t.balance_after)}</div>
+        </div>`).join("")}
+    </div>`).join("");
+  for (const t of txs) seenTx.add(t.id);
+}
+
+async function loadSeries() {
+  series = await fetch("/api/series").then(r => r.json());
+  drawChart();
+}
+
+// ---- balance line: single series, 2px line, soft area, faint grid, hover crosshair
+const cv = $("chart"), tip = $("tip");
+let pts = [];
+function drawChart(hoverX) {
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== W * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const css = getComputedStyle(document.documentElement);
+  if (series.length < 2) { $("chartRange").textContent = "First day"; return; }
+
+  const vals = series.map(s => Number(s.posted) + Number(s.accrued));
+  const vMin = Math.min(...vals), vMax = Math.max(...vals);
+  const pad = Math.max((vMax - vMin) * 0.25, 0.5);
+  const lo = vMin - pad, hi = vMax + pad;
+  const L = 8, R = 8, T = 16, B = 22, pw = W - L - R, ph = H - T - B;
+  const x = i => L + (i / (series.length - 1)) * pw;
+  const y = v => T + ph - ((v - lo) / (hi - lo)) * ph;
+  pts = vals.map((v, i) => ({ x: x(i), y: y(v), v, day: series[i].day }));
+
+  ctx.strokeStyle = css.getPropertyValue("--grid").trim(); ctx.lineWidth = 1;
+  ctx.fillStyle = css.getPropertyValue("--muted").trim(); ctx.font = "10.5px 'DM Mono', monospace";
+  for (let k = 0; k <= 3; k++) {
+    const yy = T + (ph * k) / 3;
+    ctx.beginPath(); ctx.moveTo(L, yy); ctx.lineTo(L + pw, yy); ctx.stroke();
+    ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+    ctx.fillText(money(hi - ((hi - lo) * k) / 3), L + 2, yy - 2);
+  }
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  ctx.fillText(fmtDay(series[0].day), L, H - 6);
+  ctx.textAlign = "right";
+  ctx.fillText(fmtDay(series[series.length - 1].day), L + pw, H - 6);
+
+  ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+  ctx.lineTo(pts[pts.length - 1].x, T + ph); ctx.lineTo(pts[0].x, T + ph); ctx.closePath();
+  ctx.fillStyle = css.getPropertyValue("--chart-fill").trim(); ctx.fill();
+
+  ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+  ctx.strokeStyle = css.getPropertyValue("--chart-line").trim(); ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.stroke();
+
+  const last = pts[pts.length - 1];
+  ctx.beginPath(); ctx.arc(last.x, last.y, 4, 0, Math.PI * 2);
+  ctx.fillStyle = css.getPropertyValue("--chart-line").trim(); ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = css.getPropertyValue("--card").trim(); ctx.stroke();
+
+  $("chartRange").textContent = `${series.length} days · ${fmtDay(series[0].day)} to ${fmtDay(series[series.length - 1].day)}`;
+
+  if (hoverX != null) {
+    let best = pts[0];
+    for (const p of pts) if (Math.abs(p.x - hoverX) < Math.abs(best.x - hoverX)) best = p;
+    ctx.strokeStyle = css.getPropertyValue("--muted").trim(); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(best.x, T); ctx.lineTo(best.x, T + ph); ctx.stroke();
+    ctx.beginPath(); ctx.arc(best.x, best.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = css.getPropertyValue("--card").trim(); ctx.fill();
+    ctx.strokeStyle = css.getPropertyValue("--chart-line").trim(); ctx.lineWidth = 2; ctx.stroke();
+    tip.style.display = "block"; tip.style.left = best.x + "px"; tip.style.top = (best.y - 10) + "px";
+    tip.textContent = `${fmtDay(best.day)} · ${money(best.v)}`;
+  } else tip.style.display = "none";
+}
+cv.addEventListener("pointermove", e => drawChart(e.offsetX));
+cv.addEventListener("pointerleave", () => drawChart());
+window.addEventListener("resize", () => drawChart());
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => drawChart());
+
+// ---- the one customer action
+async function deposit(amount) {
+  const r = await fetch("/api/deposit", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ amount }) });
+  if (!r.ok) { alert(await r.text()); return; }
+  await Promise.all([loadAccount(), loadTransactions(), loadSeries()]);
+}
+$("add100").addEventListener("click", () => deposit(100));
+$("addMoney").addEventListener("click", () => {
+  const v = prompt("Amount to add", "250.00");
+  const n = Number(v);
+  if (v != null && n > 0) deposit(n);
+});
+
+function tickReal() { $("realTime").textContent = new Date().toLocaleTimeString("en-GB"); }
+
+await Promise.all([loadAccount(), loadTransactions(), loadSeries()]);
+tickReal();
+setInterval(loadAccount, 1000);
+setInterval(loadTransactions, 2000);
+setInterval(loadSeries, 2000);
+setInterval(tickReal, 1000);
+</script>
+</body>
+</html>

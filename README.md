@@ -21,12 +21,19 @@ Measured results, all with zero changes to the workload:
   at 86400x, on Kubernetes, off plain `now()`.
 - The same Postgres at 3600x runs the demo UI below: daily interest, rollovers,
   and hourly cron jobs, one simulated hour per real second.
+- A small bank at 18000x (5 simulated hours per real second): one savings
+  account, daily interest accrual, one ledger posting per month. Nothing in the
+  bank knows about the warp; the month closes every 2.5 real minutes.
 - An unmodified Temporal dev server plus a Go worker at 30x: an activity with
   exponential retry backoff (1m, 2m, 4m, 8m) completes in 31 real seconds.
   30x is where Temporal's own internal deadlines stop coping; details in
   `docs/temporal-plan.md`.
 
 ![Demo UI: simulated clock at 3600x next to real time, events per hour, term deposits](docs/stack-ui.png)
+
+The bank, from the customer's side (`stack/bank`, `docs/bank-plan.md`):
+
+![Savings account: balance, interest earned this month, balance line, ledger](docs/bank-ui.png)
 
 ## Why gVisor
 
@@ -74,6 +81,11 @@ bash stack/up.sh                                  # http://localhost:8080 on the
 CONTAINER=pg TERM_DAYS=2 scripts/e2e-maturity.sh  # 2 simulated days mature in ~50 s
 CONTAINER=pg scripts/e2e-temporal.sh              # 4 retries with exponential backoff in ~30 s
 docker rm -f pg twui temporal worker
+
+# the bank: Postgres at 18000x, a Go server on the normal runtime
+bash stack/bank/up.sh                             # http://localhost:8090
+CONTAINER=bankpg scripts/e2e-bank.sh              # waits for the monthly interest posting
+docker rm -f bank bankpg
 ```
 
 The rate is fixed when a sandbox boots. `install-runtimes.sh` writes one Docker
@@ -121,8 +133,9 @@ sandboxes can share one anchor. See the roadmap.
 | `gvisor/PATCH.md` | Design notes and the refresh procedure for a new gVisor tag. |
 | `victim/` | A plain Go program that prints wall clock and elapsed time and arms a timer. |
 | `stack/` | The Docker demo: `schema-native.sql`, `up.sh`, the Bun UI in `stack/ui/`, the Temporal worker in `stack/worker/`. |
+| `stack/bank/` | The bank: one Go binary (API, embedded frontend, interest engine), `bank.sql`, `up.sh`. |
 | `k8s-lab/` | The kind lab: build, inject, `postgres.yaml`, `temporal.yaml`, `worker.yaml`, `ui.yaml`, `deploy-stack.sh`, runbook. |
-| `scripts/e2e-maturity.sh`, `e2e-temporal.sh` | The e2e tests. Each runs against Docker (`CONTAINER=`) or Kubernetes (`NS=`, `DEPLOY=`). |
+| `scripts/e2e-maturity.sh`, `e2e-temporal.sh`, `e2e-bank.sh` | The e2e tests. Each runs against Docker (`CONTAINER=`) or Kubernetes (`NS=`, `DEPLOY=`). |
 | `scripts/smoke-test.sh`, `smoke-temporal.sh` | Real images under plain `runsc`, and the Temporal server at each multiplier. |
 | `docs/temporal-plan.md` | Plan and findings for Temporal on the warped clock, including the 30x ceiling. |
 | `authority/` | An HTTP service holding `(anchorReal, anchorVirtual, multiplier)`. Builds and runs, but nothing reads it yet. |

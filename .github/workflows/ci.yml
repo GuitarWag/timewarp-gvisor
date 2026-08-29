@@ -45,10 +45,16 @@ jobs:
           go build ./...
           go vet ./...
 
+      - name: Build and vet the bank
+        working-directory: stack/bank
+        run: |
+          go build ./...
+          go vet ./...
+
       - name: Shellcheck scripts
         run: |
           sudo apt-get update -qq && sudo apt-get install -y shellcheck
-          shellcheck --severity=warning scripts/*.sh stack/*.sh gvisor/*.sh k8s-lab/*.sh
+          shellcheck --severity=warning scripts/*.sh stack/*.sh stack/bank/*.sh gvisor/*.sh k8s-lab/*.sh
 
       - name: Patch still applies to pinned gVisor tag
         run: |

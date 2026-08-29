@@ -16,7 +16,8 @@ There is no Makefile and no test suite; CI (`.github/workflows/ci.yml`) is the c
 (cd authority && go build ./... && go vet ./...)
 (cd victim && go build ./... && go vet ./...)
 (cd stack/worker && go build ./... && go vet ./...)
-shellcheck --severity=warning scripts/*.sh stack/*.sh gvisor/*.sh k8s-lab/*.sh
+(cd stack/bank && go build ./... && go vet ./...)
+shellcheck --severity=warning scripts/*.sh stack/*.sh stack/bank/*.sh gvisor/*.sh k8s-lab/*.sh
 
 # The most important CI check — the sentry patch still applies to the pinned tag:
 git clone --depth 1 --branch release-20260622.0 https://github.com/google/gvisor.git /tmp/gvisor-src
@@ -40,6 +41,7 @@ bash stack/up.sh                                  # (in VM) Postgres at 3600x + 
 CONTAINER=pg TERM_DAYS=2 scripts/e2e-maturity.sh  # e2e against Docker; NS=timewarp DEPLOY=postgres for k8s
 CONTAINER=pg scripts/e2e-temporal.sh              # Temporal retry-backoff e2e, same backend switch
 scripts/smoke-temporal.sh                         # (in VM) which multipliers the Temporal server survives
+bash stack/bank/up.sh && CONTAINER=bankpg scripts/e2e-bank.sh   # (in VM) the bank at 18000x (runsc-warp-5h), host :8090
 scripts/smoke-test.sh                             # (in VM) go/no-go: real images under plain runsc
 ```
 
@@ -66,6 +68,7 @@ The heavy end-to-end CI job (`build-runsc`) is opt-in via workflow_dispatch only
 - **`stack/`** — Docker demo in the VM: unmodified Postgres under the warped runtime (`runsc-warp-hour`, 3600x = 1 sim hour per real second), a normal-runtime UI (`stack/ui/`, Bun, built as `twui:latest` by `stack/up.sh`) reading its warped `now()`.
 - **`k8s-lab/`** — the warp on a real workload: installs `runsc-warp` as a containerd RuntimeClass on KinD nodes and runs an unmodified Postgres pod on it (`postgres.yaml`; 90-day deposit matures in ~90s, verified 2026-08-28). `deploy-stack.sh` + `ui.yaml` run the `stack/` demo (seeded Postgres + UI) on the cluster at 3600x. Probes must be `tcpSocket`, not `exec`: exec probes run inside the warped sandbox and time out. Deliberately single-pod-Postgres only: distributed DBs and the gRPC mesh need the shared-anchor work first. Runbook in `k8s-lab/README.md`.
 
+- **`stack/bank/`** — the customer-facing bank: one Go binary serves `/` (embedded `index.html`), `/api/*`, and runs the interest engine (`SELECT bank_tick()` every 300 ms real; the function walks `last_accrual_day` to `current_date`, accrues daily, posts on the 1st). Postgres on `runsc-warp-5h` (18000x), server on the normal runtime, every date from SQL `now()`. Plan and result in `docs/bank-plan.md`.
 - **`stack/worker/`** — Go Temporal worker (six sample workflows, HTTP `/start`, `/run`, `/healthz`). Runs with the Temporal dev server on `runsc-warp-temporal` (30x, the server's ceiling). Every gRPC edge must stay inside one clock domain (the `grpc-timeout` header is interpreted by the receiver's clock), which is why the UI talks to the worker over plain HTTP and never to Temporal directly. Plan and findings in `docs/temporal-plan.md`.
 
 ## Constraints that shape changes
