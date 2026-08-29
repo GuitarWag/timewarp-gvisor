@@ -272,6 +272,8 @@ async function loadEvents() {
     const meta = KIND[e.kind] ??
       (e.kind.startsWith("cron.")
         ? { cls:"cron", tag:"CRON · " + e.kind.slice(5) }
+        : e.kind.startsWith("temporal.")
+        ? { cls:"bonus", tag:"TEMPORAL · " + e.kind.slice(9) }
         : { cls:"", tag:e.kind.toUpperCase() });
     const el = document.createElement("div");
     el.className = `evt ${meta.cls} appear`;
@@ -292,6 +294,7 @@ const SERIES = [
   ["deposit.opened",   "#4f8cff", "opened"],
   ["deposit.matured",  "#2fbf71", "matured"],
   ["deposit.rolled",   "#ff8a5b", "rollover"],
+  ["temporal",         "#b98bff", "temporal"],
 ];
 document.getElementById("legend").innerHTML =
   SERIES.map(([, c, l]) => `<span><i style="background:${c}"></i>${l}</span>`).join("") +

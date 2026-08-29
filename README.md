@@ -21,6 +21,10 @@ Measured results, all with zero changes to the workload:
   at 86400x, on Kubernetes, off plain `now()`.
 - The same Postgres at 3600x runs the demo UI below: daily interest, rollovers,
   and hourly cron jobs, one simulated hour per real second.
+- An unmodified Temporal dev server plus a Go worker at 30x: an activity with
+  exponential retry backoff (1m, 2m, 4m, 8m) completes in 31 real seconds.
+  30x is where Temporal's own internal deadlines stop coping; details in
+  `docs/temporal-plan.md`.
 
 ![Demo UI: simulated clock at 3600x next to real time, events per hour, term deposits](docs/stack-ui.png)
 
@@ -65,15 +69,17 @@ limactl shell gvisor
 # the smallest proof: an unmodified Go binary, 1h timer at 1000x
 TIMER=1h RATE=1000 ./gvisor/run-victim.sh
 
-# the demo stack: Postgres at 3600x + a UI on the normal runtime
+# the demo stack: Postgres at 3600x, Temporal + worker at 30x, a UI on the normal runtime
 bash stack/up.sh                                  # http://localhost:8080 on the host
 CONTAINER=pg TERM_DAYS=2 scripts/e2e-maturity.sh  # 2 simulated days mature in ~50 s
-docker rm -f pg twui
+CONTAINER=pg scripts/e2e-temporal.sh              # 4 retries with exponential backoff in ~30 s
+docker rm -f pg twui temporal worker
 ```
 
 The rate is fixed when a sandbox boots. `install-runtimes.sh` writes one Docker
 runtime per multiplier into `/etc/docker/daemon.json`; pick the rate by picking
-the runtime.
+the runtime. Every runtime also has `--timewarp-delay=10s`: the clocks run at 1x
+for the first 10 seconds so services with start-up deadlines can come up.
 
 ## On Kubernetes
 
@@ -89,15 +95,17 @@ limactl cp -r gvisor:~/k8s-lab-bin/. k8s-lab/bin/
 KIND_CLUSTER_NAME=timewarp MULTIPLIER=3600 ./k8s-lab/inject-warp-runtime.sh
 KIND_CLUSTER_NAME=timewarp ./k8s-lab/deploy-stack.sh
 NS=timewarp DEPLOY=postgres TERM_DAYS=2 scripts/e2e-maturity.sh
-kubectl port-forward -n timewarp svc/twui 8080:3000
+NS=timewarp DEPLOY=postgres scripts/e2e-temporal.sh
+kubectl port-forward -n timewarp svc/twui 8080:3000   # the UI pod is not sandboxed, so this works
 ```
 
-Two things bit me there and are worth knowing before you try your own workload.
-Readiness probes must be `tcpSocket` or `httpGet`, because an `exec` probe runs
-inside the sandbox where its 3-second timeout is 35 microseconds real. And
-Postgres drops the odd connection at high rates, since its own
-`authentication_timeout` fires in warped time. `k8s-lab/README.md` lists the
-rest.
+Three things bit me there and are worth knowing before you try your own
+workload. Readiness probes must be `tcpSocket` or `httpGet`, because an `exec`
+probe runs inside the sandbox where its 3-second timeout is 35 microseconds
+real. Postgres drops the odd connection at high rates, since its own
+`authentication_timeout` fires in warped time. And `kubectl port-forward`
+cannot reach a gVisor pod at all; use `kubectl exec`. `k8s-lab/README.md` lists
+the rest.
 
 The lab is deliberately a single Postgres pod. Anything with inter-node clock
 agreement (a distributed database, a gRPC mesh with deadlines) breaks until
@@ -112,10 +120,11 @@ sandboxes can share one anchor. See the roadmap.
 | `gvisor/build-runsc.sh`, `install-runtimes.sh`, `run-victim.sh` | Build, register, run. Linux. |
 | `gvisor/PATCH.md` | Design notes and the refresh procedure for a new gVisor tag. |
 | `victim/` | A plain Go program that prints wall clock and elapsed time and arms a timer. |
-| `stack/` | The Docker demo: `schema-native.sql`, `up.sh`, `compose.yml`, and the Bun UI in `stack/ui/`. |
-| `k8s-lab/` | The kind lab: build, inject, `postgres.yaml`, `ui.yaml`, `deploy-stack.sh`, runbook. |
-| `scripts/e2e-maturity.sh` | The one e2e test. Runs against Docker (`CONTAINER=`) or Kubernetes (`NS=`, `DEPLOY=`). |
-| `scripts/smoke-test.sh` | Runs real images under plain `runsc` first, to separate gVisor problems from warp problems. |
+| `stack/` | The Docker demo: `schema-native.sql`, `up.sh`, the Bun UI in `stack/ui/`, the Temporal worker in `stack/worker/`. |
+| `k8s-lab/` | The kind lab: build, inject, `postgres.yaml`, `temporal.yaml`, `worker.yaml`, `ui.yaml`, `deploy-stack.sh`, runbook. |
+| `scripts/e2e-maturity.sh`, `e2e-temporal.sh` | The e2e tests. Each runs against Docker (`CONTAINER=`) or Kubernetes (`NS=`, `DEPLOY=`). |
+| `scripts/smoke-test.sh`, `smoke-temporal.sh` | Real images under plain `runsc`, and the Temporal server at each multiplier. |
+| `docs/temporal-plan.md` | Plan and findings for Temporal on the warped clock, including the 30x ceiling. |
 | `authority/` | An HTTP service holding `(anchorReal, anchorVirtual, multiplier)`. Builds and runs, but nothing reads it yet. |
 | `lima/gvisor.yaml` | The VM. |
 
@@ -138,8 +147,10 @@ Not done, in the order I would do it:
 4. A prebuilt `runsc-warp` release, so the first run does not need a 5-minute
    build.
 
-Next experiment, planned in `docs/temporal-plan.md`: a Temporal server and
-worker in warped sandboxes, so `workflow.Sleep(90d)` fires in seconds.
+Also open: why Temporal tops out at 30x. Its internal deadlines are single-digit
+seconds, which at 1000x is single-digit real milliseconds against real SQLite
+and gRPC latency. Fixing that means either raising those timeouts through
+dynamic config or accepting the ceiling.
 
 ## License
 

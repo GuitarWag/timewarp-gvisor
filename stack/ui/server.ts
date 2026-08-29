@@ -79,7 +79,9 @@ async function series(hours: number) {
     WHERE sim_at > ${since} ORDER BY sim_at`;
   const buckets = await db`
     SELECT date_trunc('hour', sim_at) AS h,
-           CASE WHEN kind LIKE 'cron.%' THEN 'cron' ELSE kind END AS kind,
+           CASE WHEN kind LIKE 'cron.%' THEN 'cron'
+                WHEN kind LIKE 'temporal.%' OR kind LIKE 'bonus.%' THEN 'temporal'
+                ELSE kind END AS kind,
            count(*)::int AS n
     FROM events WHERE sim_at > ${since}
     GROUP BY 1, 2 ORDER BY 1`;

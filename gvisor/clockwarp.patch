@@ -1,7 +1,13 @@
-From dadb5f0090a75b45052849c5c0c093ef0553605d Mon Sep 17 00:00:00 2001
+go: downloading golang.org/x/exp v0.0.0-20250711185948-6ae5c78190dc
+go: downloading golang.org/x/time v0.15.0
+pkg/syserr/syserr.go:27:2: found packages safecopy (safecopy.go) and safecopy_x (safecopy_arm64_test.go) in /private/tmp/claude-501/-Users-wagnersilva-Documents-git-timewarp-gvisor/e944c95c-35e4-461a-9d55-1da4c68e4295/scratchpad/gvisor-src/pkg/safecopy
+pkg/lisafs/fd.go:21:2: found packages refs (refcounter.go) and refs_template (refs_template.go) in /private/tmp/claude-501/-Users-wagnersilva-Documents-git-timewarp-gvisor/e944c95c-35e4-461a-9d55-1da4c68e4295/scratchpad/gvisor-src/pkg/refs
+package gvisor.dev/gvisor/pkg/sentry/kernel
+From 90015b17eab5fcae0016ece410cd43ce8b0cfcf3 Mon Sep 17 00:00:00 2001
 From: Wagner Silva <wagnergreen21@gmail.com>
-Date: Thu, 25 Jun 2026 20:01:46 +0200
-Subject: [PATCH] timewarp: scale sentry clocks via --timewarp-multiplier flag
+Date: Sat, 29 Aug 2026 16:16:09 +0100
+Subject: [PATCH] timewarp: scale sentry clocks via --timewarp-multiplier, with
+ a --timewarp-delay grace period
 
 Scales the sentry's published monotonic + realtime clocks by a runtime
 multiplier so unmodified sandboxed apps (incl. static Go binaries that
@@ -13,16 +19,20 @@ points are scaled: the vDSO param page (userspace vDSO reads) and
 Timekeeper.GetTime (syscall reads + the sentry timer subsystem), so wall
 clock, monotonic/elapsed, and sleeps/timers all warp together.
 
-Default multiplier 1 = unchanged. Prototype; not for production.
+--timewarp-delay keeps the clocks at 1x for that long (real time) after
+boot before the multiplier applies, continuously. Services with start-up
+deadlines (Temporal: 15 s fx hooks) need real time to come up.
+
+Default multiplier 1, delay 0 = unchanged. Prototype; not for production.
 ---
- pkg/sentry/kernel/timekeeper.go | 52 ++++++++++++++++++++++++++++++---
- runsc/boot/loader.go            |  1 +
- runsc/config/config.go          |  3 ++
- runsc/config/flags.go           |  1 +
- 4 files changed, 53 insertions(+), 4 deletions(-)
+ pkg/sentry/kernel/timekeeper.go | 78 +++++++++++++++++++++++++++++++--
+ runsc/boot/loader.go            |  2 +
+ runsc/config/config.go          |  7 +++
+ runsc/config/flags.go           |  2 +
+ 4 files changed, 85 insertions(+), 4 deletions(-)
 
 diff --git a/pkg/sentry/kernel/timekeeper.go b/pkg/sentry/kernel/timekeeper.go
-index 75b2986..93c52c1 100644
+index 75b2986..5c75628 100644
 --- a/pkg/sentry/kernel/timekeeper.go
 +++ b/pkg/sentry/kernel/timekeeper.go
 @@ -16,6 +16,7 @@ package kernel
@@ -33,7 +43,7 @@ index 75b2986..93c52c1 100644
  	"time"
  
  	"gvisor.dev/gvisor/pkg/atomicbitops"
-@@ -92,6 +93,35 @@ type Timekeeper struct {
+@@ -92,6 +93,61 @@ type Timekeeper struct {
  // NewTimekeeper does not take ownership of paramPage.
  //
  // SetClocks must be called on the returned Timekeeper before it is usable.
@@ -50,26 +60,52 @@ index 75b2986..93c52c1 100644
 +	}
 +}
 +
++// timewarpDelay is how long (real time, from boot) the clocks run at 1x before
++// the multiplier applies. Services with start-up deadlines (Temporal: 15 s fx
++// hooks) need real time to come up; at 1000x those 15 s are 15 ms.
++var timewarpDelay int64
++
++// SetTimewarpDelay sets the start-up grace period from a Go duration string.
++func SetTimewarpDelay(s string) {
++	if d, err := time.ParseDuration(s); err == nil && d > 0 {
++		timewarpDelay = int64(d)
++	}
++}
++
 +var (
 +	timewarpMonoAnchor int64
 +	timewarpRealAnchor int64
 +	timewarpOnce       sync.Once
 +)
 +
-+// warpRef rebases a published BaseRef onto the virtual timeline. The large
-+// epoch part stays int64; only the (small) delta is scaled in float64.
-+func warpRef(baseRef, anchor int64) int64 { return anchor + int64(float64(baseRef-anchor)*timewarpMul) }
++// warpTime maps a real clock value onto the virtual timeline: identity until
++// anchor+timewarpDelay, then scaled from that instant. Continuous at the switch.
++// The large epoch part stays int64; only the (small) delta is scaled in float64.
++func warpTime(now, anchor int64) int64 {
++	start := anchor + timewarpDelay
++	if now <= start {
++		return now
++	}
++	return start + int64(float64(now-start)*timewarpMul)
++}
 +
-+// warpFreq divides frequency by the multiplier so each cycle maps to more ns.
-+func warpFreq(freq uint64) uint64 { return uint64(float64(freq) / timewarpMul) }
++// warpRef rebases a published BaseRef onto the virtual timeline.
++func warpRef(baseRef, anchor int64) int64 { return warpTime(baseRef, anchor) }
 +
-+// warpTime scales a computed time value onto the virtual timeline.
-+func warpTime(now, anchor int64) int64 { return anchor + int64(float64(now-anchor)*timewarpMul) }
++// warpFreq divides frequency by the multiplier so each cycle maps to more ns,
++// once ref (the BaseRef being published) is past the grace period. The vDSO
++// picks the new frequency up at the next ~1 s parameter update.
++func warpFreq(freq uint64, ref, anchor int64) uint64 {
++	if ref <= anchor+timewarpDelay {
++		return freq
++	}
++	return uint64(float64(freq) / timewarpMul)
++}
 +
  func NewTimekeeper() *Timekeeper {
  	t := Timekeeper{}
  	t.realtimeClock = &timekeeperClock{tk: &t, c: sentrytime.Realtime}
-@@ -156,6 +186,12 @@ func (t *Timekeeper) SetClocks(c sentrytime.Clocks, params *VDSOParamPage) {
+@@ -156,6 +212,12 @@ func (t *Timekeeper) SetClocks(c sentrytime.Clocks, params *VDSOParamPage) {
  
  	t.monotonicOffset = wantMonotonic - nowMonotonic
  
@@ -77,19 +113,19 @@ index 75b2986..93c52c1 100644
 +		timewarpRealAnchor = nowRealtime
 +		timewarpMonoAnchor = nowMonotonic + t.monotonicOffset
 +	})
-+	log.Infof("TIMEWARP: multiplier=%v", timewarpMul)
++	log.Infof("TIMEWARP: multiplier=%v delay=%v", timewarpMul, time.Duration(timewarpDelay))
 +
  	if t.restored == nil {
  		// Hold on to the initial "boot" time.
  		t.bootTime = ktime.FromNanoseconds(nowRealtime)
-@@ -204,14 +240,14 @@ func (t *Timekeeper) startUpdater(params *VDSOParamPage) {
+@@ -204,14 +266,14 @@ func (t *Timekeeper) startUpdater(params *VDSOParamPage) {
  				if monotonicOk {
  					p.monotonicReady = 1
  					p.monotonicBaseCycles = int64(monotonicParams.BaseCycles)
 -					p.monotonicBaseRef = int64(monotonicParams.BaseRef) + t.monotonicOffset
 -					p.monotonicFrequency = monotonicParams.Frequency
 +					p.monotonicBaseRef = warpRef(int64(monotonicParams.BaseRef)+t.monotonicOffset, timewarpMonoAnchor)
-+					p.monotonicFrequency = warpFreq(monotonicParams.Frequency)
++					p.monotonicFrequency = warpFreq(monotonicParams.Frequency, int64(monotonicParams.BaseRef)+t.monotonicOffset, timewarpMonoAnchor)
  				}
  				if realtimeOk {
  					p.realtimeReady = 1
@@ -97,11 +133,11 @@ index 75b2986..93c52c1 100644
 -					p.realtimeBaseRef = int64(realtimeParams.BaseRef)
 -					p.realtimeFrequency = realtimeParams.Frequency
 +					p.realtimeBaseRef = warpRef(int64(realtimeParams.BaseRef), timewarpRealAnchor)
-+					p.realtimeFrequency = warpFreq(realtimeParams.Frequency)
++					p.realtimeFrequency = warpFreq(realtimeParams.Frequency, int64(realtimeParams.BaseRef), timewarpRealAnchor)
  				}
  				return p
  			}); err != nil {
-@@ -291,6 +327,14 @@ func (t *Timekeeper) GetTime(c sentrytime.ClockID) (int64, error) {
+@@ -291,6 +353,14 @@ func (t *Timekeeper) GetTime(c sentrytime.ClockID) (int64, error) {
  			}
  		}
  	}
@@ -117,40 +153,46 @@ index 75b2986..93c52c1 100644
  }
  
 diff --git a/runsc/boot/loader.go b/runsc/boot/loader.go
-index 768f712..1d705db 100644
+index 768f712..742e718 100644
 --- a/runsc/boot/loader.go
 +++ b/runsc/boot/loader.go
-@@ -656,6 +656,7 @@ func New(args Args) (*Loader, error) {
+@@ -656,6 +656,8 @@ func New(args Args) (*Loader, error) {
  	}
  
  	// Create timekeeper.
 +	kernel.SetTimewarpMultiplier(args.Conf.TimewarpMultiplier)
++	kernel.SetTimewarpDelay(args.Conf.TimewarpDelay)
  	tk := kernel.NewTimekeeper()
  	params := kernel.NewVDSOParamPage(l.k.MemoryFile(), vdso.ParamPage.FileRange())
  	tk.SetClocks(time.NewCalibratedClocks(), params)
 diff --git a/runsc/config/config.go b/runsc/config/config.go
-index 7306dab..392ec2d 100644
+index 7306dab..87531e8 100644
 --- a/runsc/config/config.go
 +++ b/runsc/config/config.go
-@@ -52,6 +52,9 @@ type Config struct {
+@@ -52,6 +52,13 @@ type Config struct {
  	// RootDir is the runtime root directory.
  	RootDir string `flag:"root"`
  
 +	// TimewarpMultiplier scales the sandbox clocks (timewarp prototype).
 +	TimewarpMultiplier string `flag:"timewarp-multiplier"`
 +
++	// TimewarpDelay is how long the clocks run at 1x after boot before the
++	// multiplier applies (Go duration, e.g. "10s").
++	TimewarpDelay string `flag:"timewarp-delay"`
++
  	// Traceback changes the Go runtime's traceback level.
  	Traceback string `flag:"traceback"`
  
 diff --git a/runsc/config/flags.go b/runsc/config/flags.go
-index ecd82ca..9e8c951 100644
+index ecd82ca..6480fcd 100644
 --- a/runsc/config/flags.go
 +++ b/runsc/config/flags.go
-@@ -57,6 +57,7 @@ const (
+@@ -57,6 +57,8 @@ const (
  
  // RegisterFlags registers flags used to populate Config.
  func RegisterFlags(flagSet *flag.FlagSet) {
 +	flagSet.String("timewarp-multiplier", "1", "timewarp prototype: scale sandbox clocks by this factor")
++	flagSet.String("timewarp-delay", "0s", "timewarp prototype: run clocks at 1x for this long after boot before the multiplier applies")
  	// Although these flags are not part of the OCI spec, they are used by
  	// Docker, and thus should not be changed.
  	flagSet.String("root", "", fmt.Sprintf("root directory for storage of container state, defaults are $%s/runsc, %s.", xdgRuntimeDirEnvVar, defaultRootDir))

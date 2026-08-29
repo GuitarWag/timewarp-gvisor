@@ -1,0 +1,46 @@
+# The demo's Temporal worker (stack/worker), on the same 30x RuntimeClass as the
+# server: gRPC deadlines are read on the receiver's clock, so both ends must
+# share one. The UI reaches it over plain HTTP.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: timewarp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      runtimeClassName: runsc-warp-temporal
+      containers:
+        - name: worker
+          image: twworker:latest
+          imagePullPolicy: Never   # kind load docker-image
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: temporal:7233
+            - name: DATABASE_URL
+              value: postgres://postgres:postgres@postgres:5432/timewarp
+          ports:
+            - containerPort: 8088
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8088
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker
+  namespace: timewarp
+spec:
+  selector:
+    app: worker
+  ports:
+    - port: 8088

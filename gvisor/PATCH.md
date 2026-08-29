@@ -3,15 +3,15 @@
 This is the design for the one real change that makes everything work: teach the
 gVisor **sentry** (its userspace kernel) to scale its clocks by a multiplier and
 offset, read from the clock authority. Because the sentry owns both the vDSO and
-the timer subsystem for the sandbox, scaling its clocks warps *everything* inside
-— wall-clock reads, monotonic/elapsed reads, and sleeps/timers — for any
+the timer subsystem for the sandbox, scaling its clocks warps everything inside
+(wall-clock reads, monotonic/elapsed reads, and sleeps/timers) for any
 unmodified image, including statically-linked Go binaries.
 
 > The patch is committed as `clockwarp.patch`, generated against gVisor
 > **`release-20260622.0`** (the pinned tag, kept in sync with CI). CI re-checks
 > that it still applies to that tag on every push. If you build a different tag
 > and the patch will not apply, `apply-clockwarp.py` re-ports the same edits by
-> matching source anchors and regenerates the patch — see "Build" below.
+> matching source anchors and regenerates the patch. see "Build" below.
 
 ## Why the sentry is the right layer
 
@@ -25,7 +25,7 @@ A normal process reads time three ways, and all three must warp together:
 
 seccomp/ptrace can't see the vDSO reads, which is why libfaketime fails on Go.
 gVisor *provides* the vDSO and *runs* the timer subsystem, so it sees and controls
-all three. Scale the sentry's clocks and the timer queue fires early on its own —
+all three. Scale the sentry's clocks and the timer queue fires early on its own ,
 no per-syscall sleep interception needed.
 
 ## The transform
@@ -54,14 +54,24 @@ func warp(p Parameters, w WarpParams) Parameters {
 }
 ```
 
+## Start-up grace period: `--timewarp-delay`
+
+Services with start-up deadlines cannot come up on a warped clock (Temporal's
+15 s fx hooks are 15 ms real at 1000x). `--timewarp-delay=10s` keeps both clocks
+at 1x for the first 10 real seconds after boot, then applies the multiplier
+from that instant. `warpTime` returns the input unchanged until
+`anchor + delay`, and `warpFreq` publishes the unwarped frequency until the
+BaseRef being published is past that point, so the vDSO switches at the next
+~1 s parameter update. Continuous, no jump.
+
 ## Touch-points
 
-1. **`pkg/sentry/time/calibrated_clock.go`** — `CalibratedClock.Update()` produces
+1. **`pkg/sentry/time/calibrated_clock.go`**. `CalibratedClock.Update()` produces
    the new `Parameters` each calibration cycle (~1s). Apply `warp(...)` to the
    result before it is stored/returned. This is the single highest-leverage hook:
    it feeds both `GetTime()` and the vDSO params.
 
-2. **`pkg/sentry/kernel/timekeeper.go`** — the `Timekeeper` owns two
+2. **`pkg/sentry/kernel/timekeeper.go`**. the `Timekeeper` owns two
    `CalibratedClock`s (monotonic + realtime) and pushes their params into the vDSO
    param page (`VDSOParamPage` / `k.vdsoParams`). Warp **both** clocks with the
    same multiplier so wall-clock and monotonic/timers stay consistent and timers
@@ -80,12 +90,12 @@ func warp(p Parameters, w WarpParams) Parameters {
 ## Build
 
 Two routes. The official one is **bazel** via the Makefile (`make runsc`), which
-generates protobufs/templates as part of the build — heavy (needs Docker + lots
+generates protobufs/templates as part of the build. heavy (needs Docker + lots
 of RAM/disk).
 
 The lighter route, used here, avoids bazel: the **module-proxy `@go` version** is
 a post-processed, fully buildable tree (generated `*_go_proto` packages and
-expanded `*_template` files included — the raw git `go` branch checkout is NOT
+expanded `*_template` files included. the raw git `go` branch checkout is NOT
 directly `go build`-able because those are missing). So:
 
 ```bash
@@ -98,14 +108,14 @@ python3 apply-clockwarp.py ~/gvisor-build
 cd ~/gvisor-build && go build -o ~/runsc-warp ./runsc
 ```
 
-`runsc` runs on **Linux only** — see `lima/gvisor.yaml` for the VM, and
+`runsc` runs on **Linux only**. see `lima/gvisor.yaml` for the VM, and
 `run-victim.sh` to run the victim under the patched binary.
 
 ### Patch vs. re-port
 
 `build-runsc.sh` applies the committed `clockwarp.patch` (fast path). If it does
-not apply — because the `@go` snapshot or your chosen tag has drifted from
-`release-20260622.0` — the script falls back to `apply-clockwarp.py`, which finds
+not apply. because the `@go` snapshot or your chosen tag has drifted from
+`release-20260622.0`. the script falls back to `apply-clockwarp.py`, which finds
 each touch-point by its surrounding source and re-applies the edits. To refresh
 the committed patch after a gVisor bump:
 

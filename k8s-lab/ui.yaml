@@ -23,6 +23,8 @@ spec:
           env:
             - name: DATABASE_URL
               value: postgres://postgres:postgres@postgres:5432/timewarp
+            - name: WORKER_URL
+              value: http://worker:8088
           ports:
             - containerPort: 3000
           readinessProbe:

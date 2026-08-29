@@ -1,7 +1,9 @@
 # Plan: a Temporal worker and sample jobs on the warped clock
 
-Status: plan, nothing built yet. Written 2026-08-29 against the state of the
-repo at that date (stack at 3600x, k8s lab passing, `WORKER_URL` hook in the UI).
+Status: implemented 2026-08-29. Findings are at the end; they changed two of the
+plan's assumptions (the multiplier and the need for a start-up grace period).
+Code: `stack/worker/`, `scripts/e2e-temporal.sh`, `scripts/smoke-temporal.sh`,
+`k8s-lab/temporal.yaml`, `k8s-lab/worker.yaml`.
 
 ## Goal
 
@@ -226,12 +228,84 @@ in the chart's `SERIES` list; one line in `index.html`.
    works but shows up as noise in the server logs. Raise it to hours in
    `worker.Options`, or accept the noise and note it.
 
+## Findings (2026-08-29)
+
+**The server does not start under warp without a grace period.** Temporal's fx
+start hooks have a 15 s deadline; at 1000x that is 15 ms real, and opening
+SQLite and binding ports takes about 0.9 s real. Every multiplier from 1000x up
+failed with `failed to start service worker: context deadline exceeded`. Fix:
+a new sentry flag, `--timewarp-delay` (default `0s`, we use `10s`). The clocks
+run at 1x for that long after boot, then switch to the multiplier,
+continuously. `install-runtimes.sh` and `inject-warp-runtime.sh` pass it to
+every runtime. This is the first change to `clockwarp.patch` since the pin.
+
+**The server tolerates about 30x, not 3600x.** With the grace period it starts
+at any multiplier, but once warped its internal persistence and RPC deadlines
+(single-digit seconds, i.e. single-digit real milliseconds at 1000x) fail
+against real SQLite and loopback gRPC latency. `scripts/smoke-temporal.sh`
+measured, 60 real seconds of health checks plus a workflow start and list, two
+rounds each:
+
+| multiplier | result |
+|---|---|
+| 10x, 30x | pass, every run |
+| 60x | 1 of 3 |
+| 100x | 2 of 3 |
+| 200x | fail, both runs |
+| 1000x, 3600x, 86400x | fail |
+
+So Temporal runs on its own runtime, `runsc-warp-temporal`, at 30x. The plan's
+job durations were resized from days to minutes: `FlakyReconciliation` backs
+off 1m, 2m, 4m, 8m (15 sim minutes, ~30 real seconds), `LoyaltyBonus` waits 90
+sim minutes (3 real minutes), the cron schedule runs every 5 sim minutes (every
+10 real seconds). All durations are env vars on the worker.
+
+**Task-queue partitions stop dispatching after a few minutes.** With the
+default four partitions per task queue, the server passed a 60 s smoke and the
+first e2e right after boot, then nine real minutes later activities stopped
+being dispatched while scheduled workflows kept completing. The matching
+engine logged `error fetching user data from parent ... context deadline
+exceeded` for the `/_sys/timewarp/1` child partition: partition sync is an
+internal RPC with a short deadline. Fix: run the dev server with
+`--dynamic-config-value matching.numTaskqueueReadPartitions=1` and
+`...WritePartitions=1`, so there is no parent to fetch from. Applied in
+`up.sh`, `temporal.yaml`, and `smoke-temporal.sh`. Sustained results below.
+
+**Two multipliers in one stack.** Postgres stays at 3600x for the deposit demo;
+Temporal and the worker run at 30x. Activities stamp events with the database's
+`now()`, so in the UI feed a 15-minute Temporal backoff chain shows up spread
+over hours of Postgres time. Consistent within each clock, odd across them. A
+single anchor and rate for the whole stack is the `--timewarp-anchor` roadmap
+item.
+
+**gVisor's netstack cannot reach Docker's embedded DNS.** `nslookup` to
+127.0.0.11 times out under plain `runsc` too, so it is not the warp. `up.sh`
+gives the warped worker `--add-host` entries with the real container IPs. On
+Kubernetes CoreDNS is a normal service IP and works.
+
+**`kubectl port-forward` cannot reach a gVisor pod.** It dials 127.0.0.1 inside
+the pod's network namespace; the sandbox listens in its own netstack. Postgres
+only ever worked through `kubectl exec`. In k8s mode `e2e-temporal.sh` calls
+the worker from the UI pod (`kubectl exec deploy/twui -- bun -e 'fetch(...)'`).
+The Temporal web UI on 8233 is therefore not reachable from the host on kind.
+
+**Results.** `scripts/e2e-temporal.sh`, `FlakyReconciliation`, 5 attempts with
+exponential backoff: Docker 31 s real, kind 33 s real, right after boot. With
+single-partition task queues, the same test 8 real minutes after boot (4 sim
+hours at 30x): Docker 33 s, kind 32 s. `LoyaltyBonus`,
+`StatementCycle`, `NightlyClose` (Temporal Schedule) all appear in the feed.
+`SlaEscalation` and `LongHeartbeat` are wired to `POST /run` but not exercised
+by the e2e; no `HeartbeatTimeout` observed in the runs done by hand.
+
+**Not done from the plan.** Option B (Postgres persistence for the server) was
+not attempted. The raised `StickyScheduleToStartTimeout` (1h) is in place; the
+worker still logs `Failed to poll for task ... context deadline exceeded`
+warnings at 30x, from the 60 s long-poll (2 real seconds). Harmless so far.
+
 ## Success criteria
 
-- `LoyaltyBonus` for a fresh deposit shows `bonus.paid` in the UI within 40
-  real s at 3600x, with the deposit amount increased by 1%.
-- `FlakyReconciliation` completes with 5 attempts visible in the Temporal
-  history and 4 `temporal.retry` events in the feed, within 20 real s at 3600x.
-- Both above pass on Docker and on kind through the same e2e script.
-- The findings section in this file is filled in with numbers, including the
-  highest multiplier the server tolerated.
+- [x] `FlakyReconciliation` completes with 5 attempts and 4 `temporal.retry`
+  events in the feed (31 s Docker, 33 s kind, at 30x).
+- [x] Passes on Docker and on kind through the same e2e script.
+- [x] Findings filled in with numbers, including the multiplier ceiling (30x).
+- [ ] `LoyaltyBonus` asserted by a script (it runs; checked by eye in the feed).

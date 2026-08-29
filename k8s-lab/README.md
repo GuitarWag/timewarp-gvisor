@@ -24,8 +24,9 @@ inject-warp-runtime.sh  (host) -> docker cp into kind nodes, add containerd
                                    runtime handler + runsc.toml (multiplier),
                                    restart containerd, apply RuntimeClass
 postgres.yaml           (host) -> self-contained Postgres already on the RuntimeClass
-deploy-stack.sh + ui.yaml (host) -> the stack/ demo on k8s: seeded Postgres (warped)
-                                   + Bun UI (normal runtime), port-forward :8080
+deploy-stack.sh          (host) -> the stack/ demo on k8s: seeded Postgres (warped),
+  + ui.yaml, temporal.yaml,         Temporal dev server + worker (runsc-warp-temporal, 30x),
+    worker.yaml                     Bun UI (normal runtime), port-forward :8080
 warp-postgres.sh        (host) -> OR move an existing Postgres Deployment onto it
                                    (suspends Flux if present)
 ../scripts/e2e-maturity.sh (host) -> open a deposit, poll now() until matured
@@ -81,6 +82,12 @@ kubectl port-forward -n timewarp svc/twui 8080:3000     # http://localhost:8080
 cron jobs on first boot. The UI pod has no `runtimeClassName`, so it runs in real
 time and shows both clocks.
 
+`inject-warp-runtime.sh` installs two handlers: `runsc` at `MULTIPLIER` for
+Postgres and `runsc-temporal` at `TEMPORAL_MULTIPLIER` (default 30) for the
+Temporal dev server and the worker, which is the highest rate the server stays
+healthy at (`docs/temporal-plan.md`). Both get `--timewarp-delay=10s`. Test the
+Temporal path with `NS=timewarp DEPLOY=postgres scripts/e2e-temporal.sh`.
+
 Check the sandbox is gVisor: `kubectl exec -n timewarp deploy/postgres -- dmesg`
 prints `Starting gVisor...`, and on the node `ps -eo args | grep runsc-warp`
 shows `--timewarp-multiplier=86400`.
@@ -97,6 +104,15 @@ kubectl patch deployment <deploy> -n <ns> --type=json \
 ```
 
 ## Known caveats / what to watch
+
+- **`kubectl port-forward` cannot reach a gVisor pod.** It dials 127.0.0.1 in the
+  pod's network namespace, and the sandbox listens in its own netstack. Use
+  `kubectl exec`, or call from another pod (the e2e uses the UI pod). The
+  Temporal web UI on 8233 is not reachable from the host for this reason.
+- **Start-up deadlines need real time.** Temporal refuses to start when its 15 s
+  fx hooks run at 1000x. `--timewarp-delay=10s` (in both `runsc*.toml`) keeps the
+  clocks at 1x for the first 10 s after boot. Probes that wait for readiness need
+  `initialDelaySeconds` past that.
 
 - **Probes must run outside the sandbox.** An `exec` readiness probe such as
   `pg_isready` runs inside the warped sandbox, where its 3 s timeout is 35 us

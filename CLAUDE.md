@@ -15,6 +15,7 @@ There is no Makefile and no test suite; CI (`.github/workflows/ci.yml`) is the c
 ```bash
 (cd authority && go build ./... && go vet ./...)
 (cd victim && go build ./... && go vet ./...)
+(cd stack/worker && go build ./... && go vet ./...)
 shellcheck --severity=warning scripts/*.sh stack/*.sh gvisor/*.sh k8s-lab/*.sh
 
 # The most important CI check — the sentry patch still applies to the pinned tag:
@@ -37,6 +38,8 @@ RATE=1000 ./gvisor/run-victim.sh                  # (in VM) run the unmodified v
 ./gvisor/install-runtimes.sh                      # (in VM) register runsc-warp{,-hour,-fast} Docker runtimes
 bash stack/up.sh                                  # (in VM) Postgres at 3600x + UI on host :8080
 CONTAINER=pg TERM_DAYS=2 scripts/e2e-maturity.sh  # e2e against Docker; NS=timewarp DEPLOY=postgres for k8s
+CONTAINER=pg scripts/e2e-temporal.sh              # Temporal retry-backoff e2e, same backend switch
+scripts/smoke-temporal.sh                         # (in VM) which multipliers the Temporal server survives
 scripts/smoke-test.sh                             # (in VM) go/no-go: real images under plain runsc
 ```
 
@@ -63,13 +66,15 @@ The heavy end-to-end CI job (`build-runsc`) is opt-in via workflow_dispatch only
 - **`stack/`** — Docker demo in the VM: unmodified Postgres under the warped runtime (`runsc-warp-hour`, 3600x = 1 sim hour per real second), a normal-runtime UI (`stack/ui/`, Bun, built as `twui:latest` by `stack/up.sh`) reading its warped `now()`.
 - **`k8s-lab/`** — the warp on a real workload: installs `runsc-warp` as a containerd RuntimeClass on KinD nodes and runs an unmodified Postgres pod on it (`postgres.yaml`; 90-day deposit matures in ~90s, verified 2026-08-28). `deploy-stack.sh` + `ui.yaml` run the `stack/` demo (seeded Postgres + UI) on the cluster at 3600x. Probes must be `tcpSocket`, not `exec`: exec probes run inside the warped sandbox and time out. Deliberately single-pod-Postgres only: distributed DBs and the gRPC mesh need the shared-anchor work first. Runbook in `k8s-lab/README.md`.
 
-- **`docs/temporal-plan.md`** — the plan for a Temporal worker + sample jobs on the warped clock. Key rule there: every gRPC edge must stay inside one clock domain (the `grpc-timeout` header is interpreted by the receiver's clock), which is why the UI talks to the worker over plain HTTP (`WORKER_URL/start`) and never to Temporal directly.
+- **`stack/worker/`** — Go Temporal worker (six sample workflows, HTTP `/start`, `/run`, `/healthz`). Runs with the Temporal dev server on `runsc-warp-temporal` (30x, the server's ceiling). Every gRPC edge must stay inside one clock domain (the `grpc-timeout` header is interpreted by the receiver's clock), which is why the UI talks to the worker over plain HTTP and never to Temporal directly. Plan and findings in `docs/temporal-plan.md`.
 
 ## Constraints that shape changes
 
 - **The pinned tag lives in three places** and must move together: `gvisor/clockwarp.patch` (regenerate), `gvisor/build-runsc.sh` (`GVISOR_TAG` + `GVISOR_REF`), and `.github/workflows/ci.yml` (`GVISOR_TAG` + `GVISOR_REF`). Refresh procedure is at the bottom of `gvisor/PATCH.md`.
 - **The multiplier reaches the sentry only via the runsc flag** (config → ToFlags → boot process). Env vars and host files do NOT reach the sentry — clean env, restricted mount namespace. This was the hard-won lesson; don't try to deliver config another way.
 - **The build avoids bazel.** Only the module-proxy snapshots of gVisor's `go` branch are `go build`-able (generated protos included); the release tag tree and the raw git branch are not. `@go` is a moving target and drifted past the patch on 2026-08-27, so `build-runsc.sh` pins `GVISOR_REF` to the first `go`-branch snapshot that contains `GVISOR_TAG`, and uses `go mod download -json` to find the exact cache dir. `SHIM_OUT=` also builds `containerd-shim-runsc-v1` from the same patched tree.
+- **`--timewarp-delay` (default 0s, we pass 10s everywhere)** keeps the clocks at 1x after boot so services with start-up deadlines come up. Temporal cannot start without it at any multiplier >= 1000x, and even with it only stays healthy up to ~30x (60-100x flaky, >= 200x fails): its internal persistence/RPC deadlines are a few seconds. Measured by `scripts/smoke-temporal.sh`.
+- **gVisor networking quirks.** Netstack cannot reach Docker's embedded DNS (127.0.0.11); `stack/up.sh` gives the warped worker `--add-host` entries. `kubectl port-forward` cannot reach a gVisor pod (dials 127.0.0.1 in the pod netns); use `kubectl exec` or call from another pod. CoreDNS on k8s works.
 - **Anything that runs inside the sandbox runs in warped time**, including things you think of as infrastructure: kubelet `exec` probes (`pg_isready` with a 3 s timeout fails after 35 us real at 86400x; use `tcpSocket`/`httpGet`), Postgres' `authentication_timeout` and autovacuum deadlines (connections drop now and then; `scripts/e2e-maturity.sh` retries), the UI's DB pool (short `idleTimeout`/`maxLifetime` in `stack/ui/server.ts`).
 - **kind node quirks.** `docker cp` into a node's `/tmp` (tmpfs) is silently lost; pipe over `docker exec -i` instead. The gVisor shim ignored `BinaryName` from containerd options (containerd 2.2, v2 config), so `binary_name` goes in `/etc/containerd/runsc.toml` plus a `runsc -> runsc-warp` symlink. macOS bash 3.2 has no `mapfile`.
 - **Warping is per-sandbox and set at boot.** Each warped sandbox drifts from its own start time; two warped pods do not agree on wall clock at high multipliers until the `--timewarp-anchor` roadmap item exists. Don't design anything assuming group-consistent clocks yet.

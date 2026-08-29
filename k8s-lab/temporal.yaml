@@ -1,0 +1,49 @@
+# Unmodified Temporal dev server on the 30x RuntimeClass (runsc-warp-temporal):
+# the highest rate it stays healthy at. Probe is tcpSocket, run by the kubelet in
+# real time; an exec probe would time out inside the sandbox.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal
+  namespace: timewarp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal
+  template:
+    metadata:
+      labels:
+        app: temporal
+    spec:
+      runtimeClassName: runsc-warp-temporal
+      containers:
+        - name: temporal
+          image: temporalio/temporal:latest
+          # One task-queue partition: the default 4 sync over internal RPCs whose
+          # deadlines fail under warp, and activities then never dispatch.
+          args: ["server", "start-dev", "--ip", "0.0.0.0", "--log-level", "warn",
+                 "--dynamic-config-value", "matching.numTaskqueueReadPartitions=1",
+                 "--dynamic-config-value", "matching.numTaskqueueWritePartitions=1"]
+          ports:
+            - containerPort: 7233
+            - containerPort: 8233
+          readinessProbe:
+            tcpSocket:
+              port: 7233
+            initialDelaySeconds: 12   # past the 10 s --timewarp-delay grace period
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal
+  namespace: timewarp
+spec:
+  selector:
+    app: temporal
+  ports:
+    - name: grpc
+      port: 7233
+    - name: ui
+      port: 8233

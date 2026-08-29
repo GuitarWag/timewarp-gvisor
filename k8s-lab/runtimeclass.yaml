@@ -2,6 +2,13 @@ apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:
   name: runsc-warp
-# Matches the containerd runtime handler named "runsc" that
-# inject-warp-runtime.sh adds to each kind node's config.toml.
+# containerd handler "runsc": MULTIPLIER from inject-warp-runtime.sh (default 86400).
 handler: runsc
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: runsc-warp-temporal
+# containerd handler "runsc-temporal": TEMPORAL_MULTIPLIER (default 30), the
+# highest rate the Temporal dev server stays healthy at.
+handler: runsc-temporal
